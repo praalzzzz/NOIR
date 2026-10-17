@@ -1,8 +1,12 @@
 package tv.noirstream;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.app.AlertDialog;
+import android.animation.ValueAnimator;
 import android.content.Intent;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -11,7 +15,9 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.util.LruCache;
+import android.util.Log;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -25,6 +31,8 @@ import android.view.inputmethod.InputMethodManager;
 import android.net.Uri;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -32,6 +40,8 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
+import android.widget.Toast;
 import android.webkit.WebView;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -71,6 +81,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @UnstableApi
 public final class MainActivity extends Activity {
+    private static final int REQUEST_PICK_ADDON_MANIFEST = 101;
     private static final int BG = Color.rgb(7, 8, 10);
     private static final int PANEL = Color.rgb(20, 22, 26);
     private static final int TEXT = Color.rgb(248, 249, 246);
@@ -91,19 +102,23 @@ public final class MainActivity extends Activity {
     private final Map<String, Title> knownTitles = new ConcurrentHashMap<>();
     private final Map<String, Title> addonTitles = new ConcurrentHashMap<>();
     private final Map<String, Long> continuePositions = new ConcurrentHashMap<>();
-    private final Set<String> addonManifestUrls = new HashSet<>();
+    private final AddonRegistry addonRegistry = new AddonRegistry();
+    private final Map<String, AddonInfo> addonInfo = new ConcurrentHashMap<>();
     private final Set<String> detailsRequested = new HashSet<>();
     private final Set<String> detailFailures = new HashSet<>();
     private final Set<String> seasonsRequested = new HashSet<>();
+    private final Map<String, Integer> activeSeasonRequests = new ConcurrentHashMap<>();
     private final List<ContentProvider> providers = Arrays.asList(new FilmanProvider());
     private SharedPreferences preferences;
     private LinearLayout page;
     private LinearLayout content;
+    private ScrollView pageScroll;
     private String currentRoute = "home";
     private String query = "";
     private String searchType = "all";
     private String catalogMessage = "";
     private boolean loadingSearch;
+    private boolean liveCatalogLoaded;
     private ExoPlayer player;
     private PlayerView playerView;
     private Title playingTitle;
@@ -133,8 +148,8 @@ public final class MainActivity extends Activity {
         preferences = getSharedPreferences("noir_preferences", MODE_PRIVATE);
         for (Title item : starter) knownTitles.put(item.key(), item);
         loadSavedTitles();
-        loadContinuePositions();
         loadAddonManifestUrls();
+        loadContinuePositions();
         playbackHandler = new Handler(Looper.getMainLooper());
         trending = selectType(false);
         popular = selectType(false);
@@ -213,30 +228,44 @@ public final class MainActivity extends Activity {
                 JSONArray urls = new JSONArray(preferences.getString("addon_manifest_urls", "[]"));
                 for (int i = 0; i < urls.length(); i++) {
                     String url = urls.optString(i, "");
-                    if (isSafeHttpUrl(url)) addonManifestUrls.add(url);
+                    if (isSafeAddonManifestSource(url)) addonRegistry.install(url);
+                }
+                JSONArray disabled = new JSONArray(preferences.getString("disabled_addon_manifest_urls", "[]"));
+                for (int i = 0; i < disabled.length(); i++) {
+                    String url = disabled.optString(i, "");
+                    if (addonRegistry.isInstalled(url)) addonRegistry.setEnabled(url, false);
                 }
             } catch (Exception ignored) {
                 preferences.edit().remove("addon_manifest_urls").apply();
+                addonRegistry.enableAll();
             }
         }
 
     private void loadSavedAddonManifests() {
-            for (String url : new ArrayList<>(addonManifestUrls)) fetchAddonManifest(url, false);
+            for (String url : addonRegistry.installedSources()) {
+                if (addonRegistry.isEnabled(url)) fetchAddonManifest(url, false);
+            }
         }
 
     private void persistAddonManifestUrls() {
             JSONArray urls = new JSONArray();
-            for (String url : addonManifestUrls) urls.put(url);
+            for (String url : addonRegistry.installedSources()) urls.put(url);
             preferences.edit().putString("addon_manifest_urls", urls.toString()).apply();
         }
 
+    private void persistDisabledAddonManifestUrls() {
+            JSONArray urls = new JSONArray();
+            for (String url : addonRegistry.disabledSources()) urls.put(url);
+            preferences.edit().putString("disabled_addon_manifest_urls", urls.toString()).apply();
+        }
+
     private void addAddonManifest(String url) {
-            if (!isSafeHttpUrl(url)) {
+            if (!isSafeAddonManifestSource(url)) {
                 addonMessage = "Enter a valid HTTP(S) manifest URL without embedded credentials.";
                 render();
                 return;
             }
-            if (addonManifestUrls.contains(url)) {
+            if (addonRegistry.isInstalled(url)) {
                 addonMessage = "That manifest is already installed.";
                 render();
                 return;
@@ -250,59 +279,49 @@ public final class MainActivity extends Activity {
             io.execute(() -> {
                 try {
                     JSONObject manifest = fetchJsonUrl(manifestUrl);
-                    String addonName = manifest.optString("name", "Community add-on");
-                    JSONArray items = manifest.optJSONArray("items");
-                    if (items == null || items.length() == 0 || items.length() > 100) {
-                        throw new IllegalArgumentException("The manifest must contain 1–100 items.");
-                    }
-                    List<Title> parsed = new ArrayList<>();
-                    for (int i = 0; i < items.length(); i++) {
-                        JSONObject entry = items.optJSONObject(i);
-                        if (entry == null) continue;
-                        String title = entry.optString("title", "").trim();
-                        String stream = entry.optString("stream", "");
-                        String format = entry.optString("format", "").toLowerCase(Locale.ROOT);
-                        if (title.isEmpty() || !isValidMediaSource(stream, format)) {
-                            throw new IllegalArgumentException("Item " + (i + 1) + " needs a title and a valid direct HTTP(S) stream URL.");
-                        }
-                        JSONArray rawGenres = entry.optJSONArray("genres");
-                        List<String> genres = new ArrayList<>();
-                        if (rawGenres != null) for (int n = 0; n < rawGenres.length(); n++) genres.add(rawGenres.optString(n));
-                        String poster = entry.optString("poster", "");
-                        String backdrop = entry.optString("backdrop", poster);
-                        if (!poster.isEmpty() && !isSafeArtwork(poster)) {
-                            throw new IllegalArgumentException("Item " + (i + 1) + " has an invalid poster URL.");
-                        }
-                        if (!backdrop.isEmpty() && !isSafeArtwork(backdrop)) {
-                            throw new IllegalArgumentException("Item " + (i + 1) + " has an invalid backdrop URL.");
-                        }
-                        long id = Integer.toUnsignedLong((manifestUrl + ":" + entry.optString("id", String.valueOf(i))).hashCode()) + 1;
-                        String type = "tv".equalsIgnoreCase(entry.optString("type", "movie")) ? "tv" : "movie";
-                        Title item = new Title(id, type, title, entry.optString("year", "—"),
-                                entry.optString("overview", ""), poster, backdrop, join(genres, " / "),
+                    AddonManifestParser.Manifest parsed = AddonManifestParser.parse(manifest, manifestUrl);
+                    List<Title> titles = new ArrayList<>();
+                    for (AddonManifestParser.Item entry : parsed.items) {
+                        Title item = new Title(entry.id, entry.type, entry.title, entry.year,
+                                entry.overview, entry.poster, entry.backdrop, join(entry.genres, " / "),
                                 null, null);
-                        item.streamUri = stream;
-                        item.streamFormat = format;
-                        item.addonName = addonName;
+                        item.streamUri = entry.stream;
+                        item.streamFormat = entry.format;
+                        item.addonName = parsed.name;
                         item.manifestUrl = manifestUrl;
-                        item.subtitles = parseSubtitles(entry.optJSONArray("subtitles"));
-                        parsed.add(item);
+                        for (AddonManifestParser.Subtitle subtitle : entry.subtitles) {
+                            item.subtitles.add(new SubtitleTrack(subtitle.language, subtitle.label, subtitle.url));
+                        }
+                        titles.add(item);
                     }
-                    if (parsed.isEmpty()) throw new IllegalArgumentException("No playable items were found.");
                     runOnUiThread(() -> {
+                        if (!userInitiated && !addonRegistry.isInstalled(manifestUrl)) return;
                         if (userInitiated) {
-                            addonManifestUrls.add(manifestUrl);
+                            addonRegistry.install(manifestUrl);
+                            addonRegistry.setEnabled(manifestUrl, true);
                             persistAddonManifestUrls();
+                            persistDisabledAddonManifestUrls();
                         }
-                        for (Title item : parsed) {
-                            knownTitles.put(item.key(), item);
-                            addonTitles.put(item.key(), item);
+                        addonInfo.put(manifestUrl, new AddonInfo(parsed.name, parsed.description, parsed.author,
+                                parsed.version, parsed.items.size(), parsed.id));
+                        for (Map.Entry<String, Title> entry : new ArrayList<>(addonTitles.entrySet())) {
+                            if (manifestUrl.equals(entry.getValue().manifestUrl)) addonTitles.remove(entry.getKey());
                         }
-                        addonMessage = (userInitiated ? "Added " : "Loaded ") + addonName + " · "
-                                + parsed.size() + " validated item(s).";
+                        if (addonRegistry.isEnabled(manifestUrl)) {
+                            for (Title item : titles) {
+                                knownTitles.put(item.key(), item);
+                                addonTitles.put(item.key(), item);
+                            }
+                        }
+                        addonMessage = (userInitiated ? "Added " : "Validated ") + parsed.name + " · "
+                                + parsed.items.size() + " validated item(s).";
                         if ("addons".equals(currentRoute) || "home".equals(currentRoute)) render();
                     });
                 } catch (Exception exception) {
+                    Log.w("NOIR", "Add-on manifest failed validation (" + exception.getClass().getSimpleName() + ").");
+                    if (userInitiated && manifestUrl.startsWith("content:")) {
+                        releaseLocalManifestPermission(manifestUrl);
+                    }
                     runOnUiThread(() -> {
                         addonMessage = "Add-on not loaded: " + safeErrorMessage(exception);
                         if ("addons".equals(currentRoute)) render();
@@ -311,34 +330,115 @@ public final class MainActivity extends Activity {
             });
         }
 
+    private void setAddonEnabled(String manifestUrl, boolean enabled) {
+        if (!addonRegistry.isInstalled(manifestUrl)) return;
+        if (enabled) {
+            addonRegistry.setEnabled(manifestUrl, true);
+            addonMessage = "Enabling add-on…";
+        } else {
+            addonRegistry.setEnabled(manifestUrl, false);
+            for (Map.Entry<String, Title> entry : new ArrayList<>(addonTitles.entrySet())) {
+                if (manifestUrl.equals(entry.getValue().manifestUrl)) addonTitles.remove(entry.getKey());
+            }
+            addonMessage = "Add-on disabled.";
+        }
+        persistDisabledAddonManifestUrls();
+        render();
+        if (enabled) fetchAddonManifest(manifestUrl, false);
+    }
+
     private JSONObject fetchJsonUrl(String address) throws Exception {
-            HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
-            connection.setConnectTimeout(10000);
-            connection.setReadTimeout(12000);
-            connection.setInstanceFollowRedirects(false);
-            connection.setRequestProperty("Accept", "application/json");
+            HttpURLConnection connection = null;
             try {
-                int status = connection.getResponseCode();
-                if (status < 200 || status >= 300) throw new IllegalStateException("HTTP " + status + " from the manifest host.");
-                InputStream stream = connection.getInputStream();
-                ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-                byte[] buffer = new byte[8192];
-                int count;
-                while ((count = stream.read(buffer)) != -1) {
-                    if (bytes.size() + count > 1_000_000) throw new IllegalArgumentException("Manifest exceeds the 1 MB limit.");
-                    bytes.write(buffer, 0, count);
+                InputStream stream;
+                URI source = URI.create(address);
+                if ("content".equalsIgnoreCase(source.getScheme())) {
+                    stream = getContentResolver().openInputStream(Uri.parse(address));
+                    if (stream == null) throw new IllegalStateException("The selected local manifest could not be opened.");
+                } else {
+                    connection = (HttpURLConnection) new URL(address).openConnection();
+                    connection.setConnectTimeout(10000);
+                    connection.setReadTimeout(12000);
+                    connection.setInstanceFollowRedirects(false);
+                    connection.setRequestProperty("Accept", "application/json");
+                    int status = connection.getResponseCode();
+                    if (status < 200 || status >= 300) {
+                        throw new IllegalStateException("HTTP " + status + " from the manifest host.");
+                    }
+                    stream = connection.getInputStream();
                 }
-                stream.close();
-                return new JSONObject(bytes.toString(StandardCharsets.UTF_8.name()));
+                try (InputStream input = stream; ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+                    byte[] buffer = new byte[8192];
+                    int count;
+                    while ((count = input.read(buffer)) != -1) {
+                        if (bytes.size() + count > 1_000_000) {
+                            throw new IllegalArgumentException("Manifest exceeds the 1 MB limit.");
+                        }
+                        bytes.write(buffer, 0, count);
+                    }
+                    return new JSONObject(bytes.toString(StandardCharsets.UTF_8.name()));
+                }
             } finally {
-                connection.disconnect();
+                if (connection != null) connection.disconnect();
             }
         }
 
+    private boolean isSafeAddonManifestSource(String address) {
+        if (isSafeHttpUrl(address)) return true;
+        if (address == null || address.isEmpty()) return false;
+        try {
+            URI uri = URI.create(address);
+            return "content".equalsIgnoreCase(uri.getScheme())
+                    && uri.getAuthority() != null && uri.getUserInfo() == null;
+        } catch (IllegalArgumentException exception) {
+            return false;
+        }
+    }
+
+    private void pickLocalAddonManifest() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/json", "text/json", "text/plain"});
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, REQUEST_PICK_ADDON_MANIFEST);
+        } catch (ActivityNotFoundException exception) {
+            showMessage("File picker unavailable", "This device does not provide a document picker. Install a manifest using its HTTP(S) URL instead.");
+        }
+    }
+
+    private void releaseLocalManifestPermission(String manifestUrl) {
+        try {
+            getContentResolver().releasePersistableUriPermission(
+                    Uri.parse(manifestUrl), Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (SecurityException exception) {
+            Log.w("NOIR", "Could not release local add-on document permission.");
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_PICK_ADDON_MANIFEST || resultCode != RESULT_OK
+                || data == null || data.getData() == null) return;
+        Uri uri = data.getData();
+        try {
+            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (SecurityException exception) {
+            showMessage("File access unavailable", "The selected document provider did not grant persistent read access.");
+            return;
+        }
+        addAddonManifest(uri.toString());
+    }
+
     private void removeAddonManifest(String url) {
-            addonManifestUrls.remove(url);
+            if (url.startsWith("content:")) releaseLocalManifestPermission(url);
+            addonRegistry.remove(url);
+            addonInfo.remove(url);
             addonMessage = "Removed add-on manifest.";
             persistAddonManifestUrls();
+            persistDisabledAddonManifestUrls();
             for (Map.Entry<String, Title> entry : new ArrayList<>(addonTitles.entrySet())) {
                 if (url.equals(entry.getValue().manifestUrl)) addonTitles.remove(entry.getKey());
             }
@@ -359,51 +459,19 @@ public final class MainActivity extends Activity {
         }
 
     private boolean isSafeHttpUrl(String address) {
-            if (address == null || address.isEmpty()) return false;
-            try {
-                URI uri = URI.create(address);
-                String scheme = uri.getScheme();
-                if (!("https".equalsIgnoreCase(scheme) || "http".equalsIgnoreCase(scheme))
-                        || uri.getHost() == null || uri.getUserInfo() != null) return false;
-                String query = uri.getQuery();
-                if (query != null) {
-                    for (String parameter : query.toLowerCase(Locale.ROOT).split("[&;]")) {
-                        int equals = parameter.indexOf('=');
-                        String name = equals < 0 ? parameter : parameter.substring(0, equals);
-                        if (name.contains("pass") || name.contains("token") || name.contains("secret")
-                                || name.contains("key") || name.contains("auth") || name.contains("sig")
-                                || name.contains("credential") || name.contains("session")
-                                || name.contains("cookie")) return false;
-                    }
-                }
-                return true;
-            } catch (Exception exception) {
-                return false;
-            }
-        }
-
-    private boolean isSafeArtwork(String value) {
-            return value.startsWith("/") || isSafeHttpUrl(value);
+            return MediaSourceValidator.isSafeHttpUrl(address);
         }
 
     private boolean isValidSubtitleSource(String address) {
-            if (!isSafeHttpUrl(address)) return false;
-            String path = URI.create(address).getPath().toLowerCase(Locale.ROOT);
-            return path.endsWith(".vtt") || path.endsWith(".srt");
+            return MediaSourceValidator.isValidSubtitleSource(address);
         }
 
     private boolean isValidMediaSource(String address) {
-            return isValidMediaSource(address, "");
+            return MediaSourceValidator.isValidMediaSource(address, "");
         }
 
     private boolean isValidMediaSource(String address, String format) {
-            if (!isSafeHttpUrl(address)) return false;
-            String path = URI.create(address).getPath().toLowerCase(Locale.ROOT);
-            if (path.endsWith(".torrent")) return false;
-            if ("hls".equals(format) || "dash".equals(format) || "progressive".equals(format)) return true;
-            return path.endsWith(".m3u8") || path.endsWith(".mpd") || path.endsWith(".mp4")
-                    || path.endsWith(".m4v") || path.endsWith(".webm") || path.endsWith(".mkv")
-                    || path.endsWith(".mov") || path.endsWith(".ts");
+            return MediaSourceValidator.isValidMediaSource(address, format);
         }
 
     private String safeErrorMessage(Exception exception) {
@@ -515,11 +583,14 @@ public final class MainActivity extends Activity {
         page.addView(buildHeader(), new LinearLayout.LayoutParams(-1, dp(76)));
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        scroll.setClipToPadding(false);
-        scroll.addView(content);
-        page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+        boolean animatePage = motionEnabled();
+        content.setAlpha(animatePage ? 0f : 1f);
+        pageScroll = new ScrollView(this);
+        pageScroll.setFillViewport(true);
+        pageScroll.setClipToPadding(false);
+        pageScroll.addView(content);
+        page.addView(pageScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+        if (animatePage) content.animate().alpha(1f).setDuration(220).start();
 
         switch (currentRoute) {
             case "search": renderSearch(); break;
@@ -527,6 +598,7 @@ public final class MainActivity extends Activity {
             case "continue": renderContinueWatching(); break;
             case "providers": renderProviders(); break;
             case "addons": renderAddons(); break;
+            case "addon-guide": renderAddonGuide(); break;
             case "detail": renderDetail(findTitle(query)); break;
             default: renderHome();
         }
@@ -553,7 +625,8 @@ public final class MainActivity extends Activity {
         String[][] nav = {{"Home", "home"}, {"Search", "search"}, {"Continue", "continue"},
                 {"My List", "list"}, {"Providers", "providers"}, {"Add-ons", "addons"}};
         for (String[] item : nav) {
-            boolean selected = currentRoute.equals(item[1]);
+            boolean selected = currentRoute.equals(item[1])
+                    || ("addon-guide".equals(currentRoute) && "addons".equals(item[1]));
             TextView tab = text(item[0], 15, selected ? TEXT : MUTED, selected);
             tab.setGravity(Gravity.CENTER);
             tab.setPadding(dp(18), 0, dp(18), 0);
@@ -640,7 +713,9 @@ public final class MainActivity extends Activity {
                 new int[]{BG, 0x0008090B}));
         hero.addView(bottomShade, new FrameLayout.LayoutParams(-1, -1));
 
-        TextView index = text("01  /  FEATURED", 11, 0xFFE9E9E1, true);
+        boolean curatedPreview = !liveCatalogLoaded || trending.isEmpty();
+        TextView index = text(curatedPreview ? "01  /  CURATED PREVIEW" : "01  /  FEATURED",
+                11, 0xFFE9E9E1, true);
         index.setLetterSpacing(.12f);
         index.setPadding(dp(14), 0, dp(14), 0);
         index.setBackground(rounded(0x55242626, 18));
@@ -654,7 +729,8 @@ public final class MainActivity extends Activity {
         copy.setPadding(dp(64), dp(20), 0, dp(48));
         FrameLayout.LayoutParams copyParams = new FrameLayout.LayoutParams(dp(790), -1, Gravity.START | Gravity.CENTER_VERTICAL);
         hero.addView(copy, copyParams);
-        TextView eyebrow = text("TONIGHT'S PREMIERE", 11, GOLD, true);
+        TextView eyebrow = text(curatedPreview ? "STARTER COLLECTION" : "TONIGHT'S PREMIERE",
+                11, GOLD, true);
         eyebrow.setLetterSpacing(.2f);
         eyebrow.setPadding(dp(12), dp(7), dp(12), dp(7));
         eyebrow.setBackground(rounded(0x3326F65B, 20));
@@ -698,7 +774,7 @@ public final class MainActivity extends Activity {
         heading.setLetterSpacing(-.015f);
         section.addView(heading);
         if (items == null || items.isEmpty()) {
-            TextView empty = text("Nothing here yet. Titles become available when a supported in-app source is connected.", 14, MUTED, false);
+            TextView empty = text("No titles are available in this collection right now.", 14, MUTED, false);
             LinearLayout.LayoutParams ep = new LinearLayout.LayoutParams(-1, dp(72));
             ep.topMargin = dp(12);
             section.addView(empty, ep);
@@ -709,7 +785,12 @@ public final class MainActivity extends Activity {
             horizontal.setPadding(dp(2), dp(17), dp(24), dp(16));
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
-            for (Title item : items) row.addView(buildCard(item), new LinearLayout.LayoutParams(dp(184), dp(318)));
+            boolean animateCards = motionEnabled();
+            for (int i = 0; i < items.size(); i++) {
+                View card = buildCard(items.get(i));
+                row.addView(card, new LinearLayout.LayoutParams(dp(184), dp(318)));
+                if (animateCards) animateEntry(card, Math.min(i * 28, 224));
+            }
             horizontal.addView(row);
             LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(-1, dp(343));
             section.addView(horizontal, hp);
@@ -896,7 +977,8 @@ public final class MainActivity extends Activity {
                 String endpoint = "movie".equals(selectedType) ? "movie"
                         : "tv".equals(selectedType) ? "tv" : "multi";
                 JSONObject response = requestJson("/search/" + endpoint + "?query=" + encoded + "&include_adult=false");
-                List<Title> found = parseResults(response.optJSONArray("results"), "all".equals(selectedType));
+                String expectedType = "all".equals(selectedType) ? "multi" : selectedType;
+                List<Title> found = TmdbResultsParser.parse(response.optJSONArray("results"), expectedType);
                 runOnUiThread(() -> {
                     if (!"search".equals(currentRoute) || !query.equals(term) || !searchType.equals(selectedType)) return;
                     results.removeAllViews();
@@ -905,6 +987,7 @@ public final class MainActivity extends Activity {
                     loadingSearch = false;
                 });
             } catch (Exception exception) {
+                Log.w("NOIR", "TMDB search request failed (" + exception.getClass().getSimpleName() + ").");
                 runOnUiThread(() -> {
                     if ("search".equals(currentRoute)) {
                         loadingSearch = false;
@@ -1064,24 +1147,32 @@ public final class MainActivity extends Activity {
     private void renderAddons() {
         content.setPadding(dp(64), dp(44), dp(64), dp(52));
         content.addView(text("Add-ons", 34, TEXT, true));
-        TextView summary = text("Add a JSON manifest for streams you own or are authorized to watch. NOIR does not execute add-on code, scrape websites, or store provider passwords.", 15, MUTED, false);
+        TextView summary = text("Add a remote or local JSON manifest for streams you own or are authorized to watch. NOIR does not execute add-on code, scrape websites, or store provider passwords.", 15, MUTED, false);
         summary.setMaxWidth(dp(900));
         LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(dp(920), -2);
         summaryParams.topMargin = dp(10);
         content.addView(summary, summaryParams);
+        TextView guide = actionButton("Add-on developer guide   ›", false, () -> push("addon-guide", ""));
+        LinearLayout.LayoutParams guideParams = new LinearLayout.LayoutParams(dp(300), dp(48));
+        guideParams.topMargin = dp(14);
+        content.addView(guide, guideParams);
 
         EditText manifestUrl = new EditText(this);
-        configureInput(manifestUrl, "HTTPS manifest URL");
+        configureInput(manifestUrl, "HTTP(S) manifest URL");
         LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(dp(820), dp(56));
-        inputParams.topMargin = dp(22);
+        inputParams.topMargin = dp(14);
         content.addView(manifestUrl, inputParams);
         TextView add = actionButton("Add and validate manifest", true,
                 () -> addAddonManifest(manifestUrl.getText().toString().trim()));
         LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(dp(280), dp(50));
         addParams.topMargin = dp(12);
         content.addView(add, addParams);
+        TextView local = actionButton("Choose local JSON manifest", false, this::pickLocalAddonManifest);
+        LinearLayout.LayoutParams localParams = new LinearLayout.LayoutParams(dp(280), dp(46));
+        localParams.topMargin = dp(8);
+        content.addView(local, localParams);
 
-        TextView rule = text("Accepted streams: direct HTTP(S) HLS (.m3u8), DASH (.mpd), or MP4/WebM media. Subtitles: WebVTT (.vtt) or SubRip (.srt). No torrent/magnet sources or credential-bearing URLs. HTTPS is recommended.", 14, MUTED, false);
+        TextView rule = text("Accepted streams: direct HTTP(S) HLS (.m3u8), DASH (.mpd), or progressive media. Subtitles: WebVTT (.vtt) or SubRip (.srt). No torrent/magnet sources or credential-bearing URLs. HTTPS is recommended.", 14, MUTED, false);
         rule.setMaxWidth(dp(900));
         LinearLayout.LayoutParams ruleParams = new LinearLayout.LayoutParams(dp(920), -2);
         ruleParams.topMargin = dp(18);
@@ -1093,21 +1184,61 @@ public final class MainActivity extends Activity {
             messageParams.topMargin = dp(14);
             content.addView(message, messageParams);
         }
-        if (!addonManifestUrls.isEmpty()) {
+        if (!addonRegistry.installedSources().isEmpty()) {
             TextView installed = text("Installed manifests", 20, TEXT, true);
             LinearLayout.LayoutParams installedParams = new LinearLayout.LayoutParams(-1, -2);
             installedParams.topMargin = dp(28);
             content.addView(installed, installedParams);
-            for (String url : addonManifestUrls) {
-                TextView entry = actionButton(url, false, () -> new AlertDialog.Builder(this)
+            for (String url : addonRegistry.installedSources()) {
+                AddonInfo info = addonInfo.get(url);
+                LinearLayout card = new LinearLayout(this);
+                card.setOrientation(LinearLayout.VERTICAL);
+                card.setPadding(dp(18), dp(14), dp(18), dp(14));
+                card.setBackground(rounded(PANEL, 14));
+                LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(dp(900), -2);
+                cardParams.topMargin = dp(10);
+                content.addView(card, cardParams);
+                card.addView(text(info == null ? url : info.name, 18, TEXT, true));
+                boolean enabled = addonRegistry.isEnabled(url);
+                if (info != null) {
+                    if (!info.description.isEmpty()) {
+                        TextView description = text(info.description, 13, MUTED, false);
+                        LinearLayout.LayoutParams descriptionParams = new LinearLayout.LayoutParams(-1, -2);
+                        descriptionParams.topMargin = dp(6);
+                        card.addView(description, descriptionParams);
+                    }
+                    String authorVersion = (info.author.isEmpty() ? "" : info.author)
+                            + (!info.author.isEmpty() && !info.version.isEmpty() ? "  ·  " : "")
+                            + (info.version.isEmpty() ? "" : "v" + info.version);
+                    String addonId = info.id.isEmpty() ? "" : "  ·  " + info.id;
+                    TextView meta = text((enabled ? "Enabled" : "Disabled") + "  ·  "
+                            + info.itemCount + " catalog item(s)  ·  direct media"
+                            + (authorVersion.isEmpty() ? "" : "  ·  " + authorVersion) + addonId,
+                            12, MUTED, false);
+                    LinearLayout.LayoutParams metaParams = new LinearLayout.LayoutParams(-1, -2);
+                    metaParams.topMargin = dp(6);
+                    card.addView(meta, metaParams);
+                } else {
+                    TextView status = text("Not loaded yet · refresh to check this manifest.", 12, MUTED, false);
+                    LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
+                    statusParams.topMargin = dp(6);
+                    card.addView(status, statusParams);
+                }
+                LinearLayout controls = new LinearLayout(this);
+                controls.setGravity(Gravity.CENTER_VERTICAL);
+                LinearLayout.LayoutParams controlsParams = new LinearLayout.LayoutParams(-1, dp(46));
+                controlsParams.topMargin = dp(10);
+                card.addView(controls, controlsParams);
+                controls.addView(actionButton(enabled ? "Disable" : "Enable", false,
+                        () -> setAddonEnabled(url, !enabled)), new LinearLayout.LayoutParams(dp(120), dp(42)));
+                controls.addView(actionButton("Refresh", false,
+                        () -> fetchAddonManifest(url, false)), new LinearLayout.LayoutParams(dp(120), dp(42)));
+                controls.addView(actionButton("Remove", false, () -> new AlertDialog.Builder(this)
                         .setTitle("Remove add-on?")
                         .setMessage("Remove this manifest and its cached catalog?")
                         .setNegativeButton("Cancel", null)
                         .setPositiveButton("Remove", (dialog, which) -> removeAddonManifest(url))
-                        .show());
-                LinearLayout.LayoutParams entryParams = new LinearLayout.LayoutParams(dp(850), dp(48));
-                entryParams.topMargin = dp(8);
-                content.addView(entry, entryParams);
+                        .show()), new LinearLayout.LayoutParams(dp(120), dp(42)));
             }
         }
         if (!addonTitles.isEmpty()) {
@@ -1126,9 +1257,108 @@ public final class MainActivity extends Activity {
         input.setFocusable(true);
     }
 
+    private void renderAddonGuide() {
+        content.setPadding(dp(64), dp(38), dp(64), dp(54));
+        content.addView(text("Build a NOIR add-on", 34, TEXT, true));
+        TextView intro = text("NOIR add-ons are data-only JSON catalogs of direct media URLs you own or are authorized to use. The app never loads executable add-on code.", 15, MUTED, false);
+        intro.setMaxWidth(dp(980));
+        LinearLayout.LayoutParams introParams = new LinearLayout.LayoutParams(dp(1000), -2);
+        introParams.topMargin = dp(10);
+        content.addView(intro, introParams);
+        TextView back = actionButton("‹  Back to Add-ons", false, this::onBackPressed);
+        LinearLayout.LayoutParams backParams = new LinearLayout.LayoutParams(dp(210), dp(46));
+        backParams.topMargin = dp(14);
+        content.addView(back, backParams);
+
+        List<View> sections = new ArrayList<>();
+        sections.add(addGuideSection("01  Getting started",
+                "Create a UTF-8 JSON file and host it at an HTTP(S) URL reachable from your TV. This format describes titles and direct streams; it is not a JavaScript, binary, scraping, or executable provider SDK. TV seasons and episode metadata come from TMDB. The current add-on format does not map episode entries to stream URLs."));
+        sections.add(addGuideSection("02  Manifest fields",
+                "Root: name (optional, max 120 characters), id (optional stable identifier containing letters, numbers, dot, underscore or hyphen), description (optional, max 500), author (optional, max 120), version (optional, max 64), and items (required, 1–100 objects). Item: id (unique within the manifest), type (movie or tv; defaults to movie), title (required, max 200), year, overview, poster, backdrop, genres (string array), stream (required direct HTTP(S) URL), format (hls, dash, progressive, or omitted when a supported extension identifies it), and subtitles (WebVTT/SRT URLs with optional language and label). The manifest is limited to 1 MB. Unknown fields are ignored; there are no permission, entry-point, registry, or NOIR-version fields."));
+        String example = "{\n"
+                + "  \"id\": \"example.library\",\n"
+                + "  \"name\": \"Example authorized library\",\n"
+                + "  \"description\": \"A fictional test catalog\",\n"
+                + "  \"author\": \"Example Author\",\n"
+                + "  \"version\": \"1.0.0\",\n"
+                + "  \"items\": [{\n"
+                + "    \"id\": \"sample-film\",\n"
+                + "    \"type\": \"movie\",\n"
+                + "    \"title\": \"Sample Film\",\n"
+                + "    \"year\": \"2025\",\n"
+                + "    \"overview\": \"Fictional metadata for testing.\",\n"
+                + "    \"poster\": \"https://images.example.org/poster.jpg\",\n"
+                + "    \"genres\": [\"Drama\"],\n"
+                + "    \"stream\": \"https://media.example.org/sample.m3u8\",\n"
+                + "    \"format\": \"hls\",\n"
+                + "    \"subtitles\": [{\"language\": \"en\", \"label\": \"English\", \"url\": \"https://media.example.org/sample.vtt\"}]\n"
+                + "  }]\n"
+                + "}";
+        addGuideCode(example);
+        sections.add(addGuideSection("03  Test and debug",
+                "Install a remote manifest by URL or choose a local JSON document from Add-ons. NOIR checks JSON shape, item limits, stream and artwork URLs, and subtitle extensions; the Add-ons screen reports validation errors. A structurally valid URL is not proof it is reachable or decodable. Use “Try stream in NOIR” to verify the source with Media3 on the device. Run .\\\\gradlew.bat testDebugUnitTest assembleDebug lintDebug. For device logs, use adb logcat -s NOIR."));
+        sections.add(addGuideSection("04  Package, update & security",
+                "There is no public registry configured. Host the JSON file on a trusted HTTPS server and share its URL, or select a local JSON file with the system picker. Use stable unique item IDs and increment version when publishing an update; Refresh downloads the current remote manifest. Installed add-ons can be enabled, disabled, refreshed, or removed. NOIR does not execute remote code, collect provider passwords, resolve unsupported websites, or bypass DRM/access controls. Credential-like URL parameters, embedded URL credentials, torrent/magnet sources, and unsupported subtitle extensions are rejected. The example domains are placeholders and are not playable."));
+
+        HorizontalScrollView tocScroll = new HorizontalScrollView(this);
+        tocScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout toc = new LinearLayout(this);
+        toc.setOrientation(LinearLayout.HORIZONTAL);
+        String[] tocNames = {"Getting started", "Manifest", "Testing", "Security"};
+        for (int i = 0; i < sections.size(); i++) {
+            final View target = sections.get(i);
+            TextView link = actionButton(tocNames[i], false,
+                    () -> pageScroll.post(() -> pageScroll.smoothScrollTo(0, target.getTop())));
+            LinearLayout.LayoutParams linkParams = new LinearLayout.LayoutParams(-2, dp(42));
+            linkParams.rightMargin = dp(8);
+            toc.addView(link, linkParams);
+        }
+        tocScroll.addView(toc);
+        content.addView(tocScroll, 3, new LinearLayout.LayoutParams(-1, dp(50)));
+    }
+
+    private LinearLayout addGuideSection(String title, String description) {
+        LinearLayout section = new LinearLayout(this);
+        section.setOrientation(LinearLayout.VERTICAL);
+        section.setPadding(0, dp(22), 0, dp(8));
+        section.addView(text(title, 22, TEXT, true));
+        TextView body = text(description, 15, MUTED, false);
+        body.setGravity(Gravity.TOP);
+        body.setTextIsSelectable(true);
+        LinearLayout.LayoutParams bodyParams = new LinearLayout.LayoutParams(dp(980), -2);
+        bodyParams.topMargin = dp(10);
+        section.addView(body, bodyParams);
+        content.addView(section);
+        return section;
+    }
+
+    private void addGuideCode(String code) {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(18), dp(14), dp(18), dp(14));
+        panel.setBackground(rounded(Color.rgb(14, 16, 19), 12));
+        LinearLayout.LayoutParams panelParams = new LinearLayout.LayoutParams(dp(980), -2);
+        panelParams.topMargin = dp(8);
+        content.addView(panel, panelParams);
+        panel.addView(actionButton("Copy example", false, () -> {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard != null) {
+                clipboard.setPrimaryClip(ClipData.newPlainText("NOIR add-on manifest", code));
+                Toast.makeText(this, "Example copied", Toast.LENGTH_SHORT).show();
+            }
+        }), new LinearLayout.LayoutParams(dp(150), dp(40)));
+        TextView source = text(code, 13, 0xFFE2E6E2, false);
+        source.setTypeface(Typeface.MONOSPACE);
+        source.setGravity(Gravity.TOP | Gravity.START);
+        source.setTextIsSelectable(true);
+        LinearLayout.LayoutParams sourceParams = new LinearLayout.LayoutParams(-1, -2);
+        sourceParams.topMargin = dp(10);
+        panel.addView(source, sourceParams);
+    }
+
     private void renderPlayerScreen() {
         Title item = findTitle(query);
-        if (item == null || !isValidMediaSource(item.streamUri, item.streamFormat)) {
+        if (!hasAvailableSource(item)) {
             showMessage("Playback unavailable", "This item does not contain a valid, authorized HTTP(S) media URL.");
             currentRoute = history.isEmpty() ? "home" : history.removeLast().name;
             render();
@@ -1192,7 +1422,10 @@ public final class MainActivity extends Activity {
 
             @Override
             public void onPlayerError(PlaybackException error) {
-                String message = "The stream could not be played. Verify that its HTTP(S) URL points directly to a supported video and is reachable on this device.";
+                String errorName = PlaybackException.getErrorCodeName(error.errorCode);
+                Log.w("NOIR", "Media3 playback failed (" + errorName + ").");
+                String message = "Playback failed (" + errorName
+                        + "). Verify that the direct HTTP(S) stream is reachable and uses a supported format and codec.";
                 showMessage("Playback error", message);
             }
         });
@@ -1285,8 +1518,8 @@ public final class MainActivity extends Activity {
     }
 
     private void startPlayback(Title item) {
-        if (!isValidMediaSource(item.streamUri, item.streamFormat)) {
-            showMessage("Playback unavailable", "This add-on entry has no valid direct HTTP(S) video source.");
+        if (!hasAvailableSource(item)) {
+            showMessage("Playback unavailable", "This stream is invalid or its add-on is disabled.");
             return;
         }
         knownTitles.put(item.key(), item);
@@ -1294,7 +1527,7 @@ public final class MainActivity extends Activity {
     }
 
     private void savePlaybackProgress() {
-        if (player == null || playingTitle == null || !isValidMediaSource(playingTitle.streamUri, playingTitle.streamFormat)) return;
+        if (player == null || !hasAvailableSource(playingTitle)) return;
         long position = player.getCurrentPosition();
         long duration = player.getDuration();
         if (position >= 10000 && (duration <= 0 || position < duration - 15000)) {
@@ -1355,9 +1588,14 @@ public final class MainActivity extends Activity {
         List<Title> titles = new ArrayList<>();
         for (String key : continuePositions.keySet()) {
             Title item = knownTitles.get(key);
-            if (item != null && isValidMediaSource(item.streamUri, item.streamFormat)) titles.add(item);
+            if (hasAvailableSource(item)) titles.add(item);
         }
         return titles;
+    }
+
+    private boolean hasAvailableSource(Title item) {
+        return item != null && isValidMediaSource(item.streamUri, item.streamFormat)
+                && (item.manifestUrl == null || addonRegistry.isEnabled(item.manifestUrl));
     }
 
     private String formatTime(long milliseconds) {
@@ -1437,8 +1675,8 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-1, dp(54));
         bp.topMargin = dp(20);
         copy.addView(buttons, bp);
-        if (isValidMediaSource(item.streamUri, item.streamFormat)) {
-            buttons.addView(actionButton("Play in NOIR   ▶", true, () -> startPlayback(item)),
+        if (hasAvailableSource(item)) {
+            buttons.addView(actionButton("Try stream in NOIR   ▶", true, () -> startPlayback(item)),
                     new LinearLayout.LayoutParams(dp(220), dp(50)));
         } else {
             TextView unavailable = text("NO IN-APP SOURCE", 12, MUTED, true);
@@ -1462,7 +1700,7 @@ public final class MainActivity extends Activity {
             error.setPadding(dp(64), dp(12), dp(64), dp(6));
             content.addView(error);
         }
-        if (!isValidMediaSource(item.streamUri, item.streamFormat)) addProviderAvailability(item);
+        if (!hasAvailableSource(item)) addProviderAvailability(item);
         if (!item.similar.isEmpty()) addSection("More like this", item.similar, "similar");
     }
 
@@ -1479,11 +1717,12 @@ public final class MainActivity extends Activity {
                 JSONObject details = requestJson("/" + kind + "/" + item.id);
                 JSONObject related = requestJson("/" + kind + "/" + item.id + "/similar");
                 item.mergeDetails(details);
-                item.similar = parseResults(related.optJSONArray("results"), false);
+                item.similar = TmdbResultsParser.parse(related.optJSONArray("results"), kind);
                 runOnUiThread(() -> {
                     if ("detail".equals(currentRoute) && query.equals(item.key())) render();
                 });
             } catch (Exception ignored) {
+                Log.w("NOIR", "TMDB title details request failed (" + ignored.getClass().getSimpleName() + ").");
                 runOnUiThread(() -> {
                     detailFailures.add(item.key());
                     if ("detail".equals(currentRoute) && query.equals(item.key())) render();
@@ -1496,22 +1735,14 @@ public final class MainActivity extends Activity {
         io.execute(() -> {
             try {
                 JSONObject show = requestJson("/tv/" + item.id);
-                JSONArray seasons = show.optJSONArray("seasons");
-                List<Integer> seasonNumbers = new ArrayList<>();
-                List<String> seasonNames = new ArrayList<>();
-                if (seasons != null) for (int i = 0; i < seasons.length(); i++) {
-                    JSONObject season = seasons.optJSONObject(i);
-                    if (season == null || season.optInt("season_number", 0) == 0) continue;
-                    seasonNumbers.add(season.optInt("season_number"));
-                    seasonNames.add(season.optString("name", "Season " + season.optInt("season_number")));
-                }
+                List<TmdbSeriesParser.Season> seasons = TmdbSeriesParser.parseSeasons(show);
                 runOnUiThread(() -> {
                     if (!"detail".equals(currentRoute) || !query.equals(item.key())) return;
                     LinearLayout section = new LinearLayout(this);
                     section.setOrientation(LinearLayout.VERTICAL);
                     section.setPadding(dp(64), dp(24), dp(48), dp(10));
                     section.addView(text("Seasons & episodes", 23, TEXT, true));
-                    if (seasonNumbers.isEmpty()) {
+                    if (seasons.isEmpty()) {
                         TextView unavailable = text("No season information is available for this series.", 14, MUTED, false);
                         LinearLayout.LayoutParams up = new LinearLayout.LayoutParams(-1, dp(50));
                         up.topMargin = dp(10);
@@ -1525,40 +1756,51 @@ public final class MainActivity extends Activity {
                     seasonScroll.setHorizontalScrollBarEnabled(false);
                     seasonScroll.addView(choices);
                     section.addView(seasonScroll);
-                    for (int index = 0; index < seasonNumbers.size(); index++) {
-                        int number = seasonNumbers.get(index);
-                        String label = seasonNames.get(index);
+                    for (int index = 0; index < seasons.size(); index++) {
+                        TmdbSeriesParser.Season season = seasons.get(index);
+                        int number = season.number;
+                        String label = season.name;
                         TextView choice = actionButton(label, index == 0, () -> loadEpisodes(item, number, section));
                         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, dp(48));
                         p.rightMargin = dp(10);
                         choices.addView(choice, p);
                     }
                     content.addView(section);
-                    loadEpisodes(item, seasonNumbers.get(0), section);
+                    loadEpisodes(item, seasons.get(0).number, section);
                 });
-            } catch (Exception ignored) {
+            } catch (Exception exception) {
+                Log.w("NOIR", "TMDB seasons request failed (" + exception.getClass().getSimpleName() + ").");
                 runOnUiThread(() -> {
                     if (!"detail".equals(currentRoute) || !query.equals(item.key())) return;
-                    TextView error = text("Episodes could not be loaded. Check the TMDB connection and try again.", 14, MUTED, false);
-                    error.setPadding(dp(64), dp(14), dp(64), dp(8));
-                    content.addView(error);
+                    TextView error = text("Seasons could not be loaded. Check the TMDB connection and try again.", 14, MUTED, false);
+                    error.setPadding(dp(64), dp(14), dp(24), dp(8));
+                    LinearLayout row = new LinearLayout(this);
+                    row.setGravity(Gravity.CENTER_VERTICAL);
+                    row.addView(error, new LinearLayout.LayoutParams(0, -2, 1f));
+                    row.addView(actionButton("Retry", false, () -> {
+                        seasonsRequested.remove(item.key());
+                        render();
+                    }), new LinearLayout.LayoutParams(dp(120), dp(44)));
+                    content.addView(row);
                 });
             }
         });
     }
 
     private void loadEpisodes(Title item, int season, LinearLayout section) {
+        activeSeasonRequests.put(item.key(), season);
+        while (section.getChildCount() > 2) section.removeViewAt(2);
+        TextView loading = text("Loading episodes…", 14, MUTED, false);
+        LinearLayout.LayoutParams loadingParams = new LinearLayout.LayoutParams(-1, dp(48));
+        loadingParams.topMargin = dp(8);
+        section.addView(loading, loadingParams);
         io.execute(() -> {
             try {
                 JSONObject response = requestJson("/tv/" + item.id + "/season/" + season);
-                JSONArray episodes = response.optJSONArray("episodes");
-                List<JSONObject> values = new ArrayList<>();
-                if (episodes != null) for (int i = 0; i < episodes.length(); i++) {
-                    JSONObject episode = episodes.optJSONObject(i);
-                    if (episode != null) values.add(episode);
-                }
+                List<TmdbSeriesParser.Episode> values = TmdbSeriesParser.parseEpisodes(response, season);
                 runOnUiThread(() -> {
-                    if (!"detail".equals(currentRoute) || !query.equals(item.key())) return;
+                    if (!"detail".equals(currentRoute) || !query.equals(item.key())
+                            || !Integer.valueOf(season).equals(activeSeasonRequests.get(item.key()))) return;
                     while (section.getChildCount() > 2) section.removeViewAt(2);
                     if (values.isEmpty()) {
                         TextView empty = text("No episode entries are listed for this season.", 14, MUTED, false);
@@ -1566,16 +1808,28 @@ public final class MainActivity extends Activity {
                         ep.topMargin = dp(8);
                         section.addView(empty, ep);
                     }
-                    for (JSONObject episode : values) {
-                        int number = episode.optInt("episode_number");
+                    for (TmdbSeriesParser.Episode episode : values) {
+                        int number = episode.episodeNumber;
                         String watchedKey = "watched_" + item.id + "_" + season + "_" + number;
                         boolean watched = preferences.getBoolean(watchedKey, false);
                         String heading = String.format(Locale.US, "S%02d E%02d   %s",
-                                season, number, episode.optString("name", "Episode"));
+                                episode.seasonNumber, number, episode.title);
                         LinearLayout episodeCard = new LinearLayout(this);
                         episodeCard.setOrientation(LinearLayout.VERTICAL);
                         episodeCard.setPadding(dp(15), dp(10), dp(15), dp(10));
                         episodeCard.setBackground(rounded(PANEL, 12));
+                        if (!episode.stillPath.isEmpty()) {
+                            ImageView still = new ImageView(this);
+                            still.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                            still.setBackground(posterPlaceholder());
+                            still.setClipToOutline(true);
+                            String stillUrl = episode.stillPath.startsWith("http")
+                                    ? episode.stillPath : TMDB_IMAGE + "w300" + episode.stillPath;
+                            loadImage(stillUrl, still);
+                            LinearLayout.LayoutParams stillParams = new LinearLayout.LayoutParams(dp(260), dp(146));
+                            stillParams.bottomMargin = dp(8);
+                            episodeCard.addView(still, stillParams);
+                        }
                         LinearLayout topRow = new LinearLayout(this);
                         topRow.setGravity(Gravity.CENTER_VERTICAL);
                         TextView row = text(heading, 16, TEXT, true);
@@ -1586,7 +1840,7 @@ public final class MainActivity extends Activity {
                         });
                         topRow.addView(markWatched, new LinearLayout.LayoutParams(dp(150), dp(38)));
                         episodeCard.addView(topRow);
-                        String overview = episode.optString("overview", "");
+                        String overview = episode.overview;
                         if (!overview.isEmpty()) {
                             TextView description = text(overview, 13, MUTED, false);
                             description.setMaxLines(3);
@@ -1594,7 +1848,7 @@ public final class MainActivity extends Activity {
                             descriptionParams.topMargin = dp(5);
                             episodeCard.addView(description, descriptionParams);
                         }
-                        String airDate = episode.optString("air_date", "");
+                        String airDate = episode.airDate;
                         if (!airDate.isEmpty()) {
                             TextView date = text(airDate, 11, MUTED, false);
                             LinearLayout.LayoutParams dateParams = new LinearLayout.LayoutParams(-1, -2);
@@ -1607,7 +1861,21 @@ public final class MainActivity extends Activity {
                     }
                 });
             } catch (Exception exception) {
-                runOnUiThread(() -> showMessage("Episodes unavailable", "TMDB could not load this season. Check the connection and try again."));
+                Log.w("NOIR", "TMDB episode request failed (" + exception.getClass().getSimpleName() + ").");
+                runOnUiThread(() -> {
+                    if (!"detail".equals(currentRoute) || !query.equals(item.key())
+                            || !Integer.valueOf(season).equals(activeSeasonRequests.get(item.key()))) return;
+                    while (section.getChildCount() > 2) section.removeViewAt(2);
+                    TextView message = text("Episodes could not be loaded. " + safeErrorMessage(exception),
+                            14, MUTED, false);
+                    LinearLayout.LayoutParams messageParams = new LinearLayout.LayoutParams(0, -2, 1f);
+                    LinearLayout row = new LinearLayout(this);
+                    row.setGravity(Gravity.CENTER_VERTICAL);
+                    row.addView(message, messageParams);
+                    row.addView(actionButton("Retry", false, () -> loadEpisodes(item, season, section)),
+                            new LinearLayout.LayoutParams(dp(120), dp(44)));
+                    section.addView(row);
+                });
             }
         });
     }
@@ -1621,21 +1889,23 @@ public final class MainActivity extends Activity {
                 JSONObject seriesResponse = requestJson("/tv/popular");
                 JSONObject recentResponse = requestJson("/movie/now_playing");
                 JSONObject animationResponse = requestJson("/discover/movie?with_genres=16&sort_by=popularity.desc");
-                List<Title> liveTrending = parseResults(trendingResponse.optJSONArray("results"), false);
-                List<Title> livePopular = parseResults(popularResponse.optJSONArray("results"), false);
-                List<Title> liveSeries = parseResults(seriesResponse.optJSONArray("results"), false);
-                List<Title> liveRecent = parseResults(recentResponse.optJSONArray("results"), false);
-                List<Title> liveAnimation = parseResults(animationResponse.optJSONArray("results"), false);
+                List<Title> liveTrending = TmdbResultsParser.parse(trendingResponse.optJSONArray("results"), "movie");
+                List<Title> livePopular = TmdbResultsParser.parse(popularResponse.optJSONArray("results"), "movie");
+                List<Title> liveSeries = TmdbResultsParser.parse(seriesResponse.optJSONArray("results"), "tv");
+                List<Title> liveRecent = TmdbResultsParser.parse(recentResponse.optJSONArray("results"), "movie");
+                List<Title> liveAnimation = TmdbResultsParser.parse(animationResponse.optJSONArray("results"), "movie");
                 runOnUiThread(() -> {
-                    trending = nonEmpty(liveTrending, trending);
-                    popular = nonEmpty(livePopular, popular);
-                    series = nonEmpty(liveSeries, series);
-                    newTitles = nonEmpty(liveRecent, newTitles);
-                    animation = nonEmpty(liveAnimation, animation);
+                    trending = liveTrending;
+                    popular = livePopular;
+                    series = liveSeries;
+                    newTitles = liveRecent;
+                    animation = liveAnimation;
+                    liveCatalogLoaded = true;
                     catalogMessage = "Live catalog · powered by TMDB";
                     if ("home".equals(currentRoute)) render();
                 });
             } catch (Exception exception) {
+                Log.w("NOIR", "TMDB catalog request failed (" + exception.getClass().getSimpleName() + ").");
                 runOnUiThread(() -> {
                     catalogMessage = "Live catalog unavailable · showing the starter collection";
                     if ("home".equals(currentRoute)) render();
@@ -1666,51 +1936,6 @@ public final class MainActivity extends Activity {
         } finally {
             connection.disconnect();
         }
-    }
-
-    private List<Title> parseResults(JSONArray results, boolean mixed) {
-        List<Title> output = new ArrayList<>();
-        if (results == null) return output;
-        for (int i = 0; i < results.length(); i++) {
-            JSONObject object = results.optJSONObject(i);
-            if (object == null) continue;
-            String type = mixed ? object.optString("media_type", "") : "";
-            if (type.isEmpty() || "movie".equals(type)) {
-                if (object.has("title") || !mixed) type = "movie";
-                else continue;
-            } else if (!"tv".equals(type)) continue;
-            String name = object.optString(type.equals("tv") ? "name" : "title", "");
-            if (name.isEmpty()) continue;
-            String date = object.optString(type.equals("tv") ? "first_air_date" : "release_date", "");
-            String year = date.length() >= 4 ? date.substring(0, 4) : "—";
-            String poster = object.optString("poster_path", "");
-            if (poster.isEmpty()) continue;
-            List<String> genres = genreNames(object.optJSONArray("genre_ids"));
-            Double rating = object.has("vote_average") ? object.optDouble("vote_average", 0) : 0;
-            Title item = new Title(object.optLong("id"), type, name, year,
-                    object.optString("overview", ""), poster, object.optString("backdrop_path", ""),
-                    join(genres, " / "), rating > 0 ? rating : null, null);
-            output.add(item);
-            knownTitles.put(item.key(), item);
-        }
-        return output;
-    }
-
-    private List<String> genreNames(JSONArray ids) {
-        Map<Integer, String> names = new HashMap<>();
-        names.put(28, "Action"); names.put(12, "Adventure"); names.put(16, "Animation"); names.put(35, "Comedy");
-        names.put(80, "Crime"); names.put(99, "Documentary"); names.put(18, "Drama"); names.put(10751, "Family");
-        names.put(14, "Fantasy"); names.put(36, "History"); names.put(27, "Horror"); names.put(10402, "Music");
-        names.put(9648, "Mystery"); names.put(10749, "Romance"); names.put(878, "Sci-Fi"); names.put(10770, "TV Movie");
-        names.put(53, "Thriller"); names.put(10752, "War"); names.put(37, "Western"); names.put(10759, "Action & Adventure");
-        names.put(10762, "Kids"); names.put(10763, "News"); names.put(10764, "Reality"); names.put(10765, "Sci-Fi & Fantasy");
-        names.put(10766, "Soap"); names.put(10767, "Talk"); names.put(10768, "War & Politics");
-        List<String> output = new ArrayList<>();
-        if (ids != null) for (int i = 0; i < Math.min(ids.length(), 3); i++) {
-            String name = names.get(ids.optInt(i));
-            if (name != null) output.add(name);
-        }
-        return output;
     }
 
     private void loadImage(String url, ImageView target) {
@@ -1755,10 +1980,6 @@ public final class MainActivity extends Activity {
         for (Title item : starter) if (item.genres.toLowerCase(Locale.ROOT).contains("animation")
                 || item.genres.toLowerCase(Locale.ROOT).contains("anime")) output.add(item);
         return output;
-    }
-
-    private List<Title> nonEmpty(List<Title> preferred, List<Title> fallback) {
-        return preferred == null || preferred.isEmpty() ? fallback : preferred;
     }
 
     private Title featured() {
@@ -1905,10 +2126,26 @@ public final class MainActivity extends Activity {
 
     private void addFocusAnimation(View view) {
         view.setOnFocusChangeListener((focusedView, focused) -> {
-            focusedView.animate().scaleX(focused ? 1.04f : 1f).scaleY(focused ? 1.04f : 1f)
-                    .setDuration(130).start();
+            if (motionEnabled()) {
+                focusedView.animate().scaleX(focused ? 1.04f : 1f).scaleY(focused ? 1.04f : 1f)
+                        .setDuration(130).start();
+            } else {
+                focusedView.setScaleX(1f);
+                focusedView.setScaleY(1f);
+            }
             focusedView.setElevation(focused ? dp(10) : 0);
         });
+    }
+
+    private void animateEntry(View view, long delay) {
+        view.setAlpha(0f);
+        view.setTranslationY(dp(12));
+        view.animate().alpha(1f).translationY(0f).setStartDelay(delay).setDuration(190).start();
+    }
+
+    private boolean motionEnabled() {
+        if (android.os.Build.VERSION.SDK_INT >= 26) return ValueAnimator.areAnimatorsEnabled();
+        return Settings.Global.getFloat(getContentResolver(), Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f;
     }
 
     private GradientDrawable rounded(int color, int radius) {
@@ -1936,6 +2173,24 @@ public final class MainActivity extends Activity {
             this.group = group;
             this.index = index;
             this.label = label;
+        }
+    }
+
+    private static final class AddonInfo {
+        final String name;
+        final String description;
+        final String author;
+        final String version;
+        final int itemCount;
+        final String id;
+
+        AddonInfo(String name, String description, String author, String version, int itemCount, String id) {
+            this.name = name;
+            this.description = description;
+            this.author = author;
+            this.version = version;
+            this.itemCount = itemCount;
+            this.id = id;
         }
     }
 
@@ -1970,9 +2225,13 @@ public final class MainActivity extends Activity {
             this.rating = rating; this.runtime = runtime;
         }
         String key() { return type + ":" + id + ":" + name; }
-        String posterUrl(String size) { return posterPath.startsWith("http") ? posterPath : TMDB_IMAGE + size + posterPath; }
+        String posterUrl(String size) {
+            if (posterPath == null || posterPath.isEmpty()) return "";
+            return posterPath.startsWith("http") ? posterPath : TMDB_IMAGE + size + posterPath;
+        }
         String backdropUrl(String size) {
             String path = backdropPath == null || backdropPath.isEmpty() ? posterPath : backdropPath;
+            if (path == null || path.isEmpty()) return "";
             return path.startsWith("http") ? path : TMDB_IMAGE + size + path;
         }
         void mergeDetails(JSONObject details) {

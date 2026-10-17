@@ -1,0 +1,141 @@
+# NOIR add-on development
+
+## What an add-on is
+
+The current NOIR add-on format is a **declarative JSON catalog**, not an executable provider SDK. It describes titles and direct HTTP(S) media URLs that you own or are authorized to use. NOIR does not execute remote code, scrape websites, collect streaming credentials, resolve unsupported source pages, or bypass DRM or access controls.
+
+An add-on can supply movie or series catalog entries and direct streams. It cannot currently register Java/Kotlin/JavaScript provider code, define an update registry, declare permissions, map a series' seasons and episodes to individual stream URLs, or specify a supported NOIR version. Series and episode metadata shown by the app comes from TMDB; it does not make an episode playable.
+
+## Getting started
+
+1. Create a UTF-8 JSON file.
+2. Add an `items` array with at least one title and direct stream you control.
+3. Either host the file at an HTTP(S) URL reachable from the Android TV/Fire TV device (HTTPS recommended), or copy it to storage visible to the device.
+4. In NOIR, open **Add-ons** and enter the manifest URL, or choose **Choose local JSON manifest** in the system file picker.
+5. Review the catalog item, open its title, then choose **Try stream in NOIR**. The URL validator checks structure and policy; only the actual player can test reachability, codecs, and decoder support.
+
+The manifest is limited to 1 MB and 100 items.
+
+### Minimal manifest
+
+This fictional manifest uses an explicit progressive format; its example URL is not playable.
+
+```json
+{
+  "name": "My test library",
+  "items": [
+    {
+      "title": "Sample Video",
+      "stream": "https://media.example.org/sample.mp4",
+      "format": "progressive"
+    }
+  ]
+}
+```
+
+## Manifest reference
+
+Unknown fields are ignored. Root fields:
+
+| Field | Required | Meaning and validation |
+|---|---:|---|
+| `name` | No | Display name; defaults to `Community add-on`; maximum 120 characters. |
+| `id` | No | Optional stable add-on identifier. Up to 100 letters, digits, dots, underscores, or hyphens. |
+| `description` | No | Description shown in the installed add-on card; maximum 500 characters. |
+| `author` | No | Optional author label; maximum 120 characters. |
+| `version` | No | Optional display version; maximum 64 characters. |
+| `items` | Yes | Array of 1–100 catalog item objects. |
+
+Item fields:
+
+| Field | Required | Meaning and validation |
+|---|---:|---|
+| `id` | No | Stable item identifier, unique within this manifest; up to 100 letters, digits, dots, underscores, or hyphens. If omitted, the item's array index is used. |
+| `type` | No | `movie` or `tv`; defaults to `movie`. |
+| `title` | Yes | Non-empty display title; maximum 200 characters. |
+| `year` | No | Display year or release label. |
+| `overview` | No | Display synopsis. |
+| `poster` | No | Safe HTTP(S) artwork URL or an absolute path such as a TMDB image path. |
+| `backdrop` | No | Safe HTTP(S) artwork URL or absolute path; defaults to `poster`. |
+| `genres` | No | Array of up to 30 non-empty genre labels. |
+| `stream` | Yes | Direct HTTP(S) stream URL. It must pass NOIR's URL rules and either have a supported media extension or a supported `format`. |
+| `format` | No | `hls`, `dash`, or `progressive`. If omitted, NOIR infers HLS/DASH and common progressive formats from the URL path. |
+| `subtitles` | No | Array of external subtitle objects. Only WebVTT (`.vtt`) and SubRip (`.srt`) URLs are accepted. |
+
+Each subtitle object has a required `url` and optional `language` (or `lang`) and `label`. Invalid subtitle entries invalidate the manifest item list rather than being silently accepted.
+
+### Valid fictional example
+
+The example uses reserved `.example.org` hostnames. It passes the manifest structure checks, but it is deliberately **not playable**.
+
+```json
+{
+  "id": "sample.library",
+  "name": "Sample authorized library",
+  "description": "A fictional catalog for testing the manifest format.",
+  "author": "Example Author",
+  "version": "1.0.0",
+  "items": [
+    {
+      "id": "sample-film",
+      "type": "movie",
+      "title": "Sample Film",
+      "year": "2025",
+      "overview": "Fictional metadata for testing.",
+      "poster": "https://images.example.org/poster.jpg",
+      "backdrop": "https://images.example.org/backdrop.jpg",
+      "genres": ["Drama"],
+      "stream": "https://media.example.org/sample.m3u8",
+      "format": "hls",
+      "subtitles": [
+        {
+          "language": "en",
+          "label": "English",
+          "url": "https://media.example.org/sample.vtt"
+        }
+      ]
+    }
+  ]
+}
+```
+
+To create a minimal catalog, keep the `items` field and an item with `title` and `stream`; omit the optional metadata and subtitles. Choose a stream format supported by the NOIR player and use only a direct URL you are authorized to distribute.
+
+## Metadata and series behavior
+
+The app preserves a title's type, display name, year, overview, artwork paths, genres, add-on name, and source format. Missing artwork is allowed and rendered using the app's placeholder. `type: "tv"` categorizes an item as a series, but the current manifest schema has no `seasons` or `episodes` fields. A `stream` on a TV item is a single direct stream, not an episode map.
+
+TMDB supplies live catalog metadata, details, season lists, and episode metadata when a TMDB API key is configured. TMDB does not supply playable video. To play an episode, NOIR would need an authorized direct episode stream and a supported episode-to-source mapping; that mapping is not part of this add-on format yet.
+
+## Testing and debugging
+
+- Test with fictional metadata and placeholder URLs first; do not label mock data as a real integration.
+- Use a URL reachable from the TV, not merely from the development computer.
+- Reinstall or use **Refresh** after publishing a manifest change.
+- Validation errors appear in the Add-ons screen. A manifest that passes validation may still point to an unavailable stream or unsupported codec.
+- Select **Try stream in NOIR** to test playback. ExoPlayer reports network, format, and decoder failures in the app.
+- Device logs can be inspected with `adb logcat -s NOIR`.
+- Run the repository's JVM parser tests and checks:
+
+  ```powershell
+  .\gradlew.bat testDebugUnitTest
+  .\gradlew.bat assembleDebug
+  .\gradlew.bat lintDebug
+  ```
+
+The automated parser tests use mocked JSON and do not contact TMDB or validate a real stream. No physical Fire TV device is required for these JVM tests.
+
+## Installation, updates, and distribution
+
+NOIR installs manifests by HTTP(S) URL or by selecting a local JSON document. It stores the URL or persistable document URI locally; removing a local add-on releases the document permission. The installed add-on screen supports enable, disable, refresh (for remote manifests), and removal. There is no public registry configured. A curator can host a catalog or publish a directory of trusted manifest URLs separately; the application does not assume a registry endpoint. Executable add-on packages are not supported.
+
+Keep item IDs stable between releases, update the optional `version` when the catalog changes, and host updates at the installed URL. NOIR displays the version as metadata; it does not perform semantic version comparisons or compatibility enforcement.
+
+## Security and playback boundaries
+
+- Do not put passwords, cookies, API keys, session IDs, signatures, or access tokens in URLs or manifest fields.
+- URLs with embedded user information and credential-like query parameter names are rejected. Magnet and torrent links are not supported.
+- HTTP is permitted for compatibility but is unencrypted; prefer HTTPS.
+- A valid URL is not proof that a source can be played. The user explicitly starts playback, and Media3 reports actual loading/decoding failures.
+- NOIR does not load executable remote add-ons, so this format has no code permissions or entry point.
+- Do not use the manifest to redistribute media unless you have authorization to do so.

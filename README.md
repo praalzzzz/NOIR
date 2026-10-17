@@ -49,7 +49,7 @@ No other API key is required by the app. There is no OpenSubtitles or other thir
 
 ## Add-ons and playback
 
-The **Add-ons** tab accepts an HTTP(S) URL to a JSON manifest. Only install manifests you trust. Manifests are limited to 1 MB and 100 entries. Each entry must provide a direct HTTP(S) media URL and an explicit format (`hls`, `dash`, or `progressive`); supported file extensions are also detected when format is omitted. Example structure:
+The **Add-ons** tab accepts an HTTP(S) URL or a local JSON document selected with the system file picker. Only install manifests you trust. Manifests are limited to 1 MB and 100 entries. Each entry must provide a title and a direct HTTP(S) media URL. The format may be specified as `hls`, `dash`, or `progressive`; supported file extensions are also detected when format is omitted. Installed add-ons can be enabled, disabled, refreshed, or removed. The app displays optional name, description, author, and version metadata. See the [add-on developer tutorial](docs/addon-development.md) for the supported manifest fields and a complete fictional example.
 
 ```json
 {
@@ -87,6 +87,7 @@ The app blocks `magnet:`/torrent URLs and rejects URL query parameters that look
 - **Official services:** The Providers tab links to TVP VOD, Rakuten TV Free, Plex, South Park Studios, and JustWatch Polska. These are external links and leave NOIR; country, catalog, language, account, and Fire TV app availability can vary. JustWatch is a discovery guide, not a video player. CDA.pl and bajeczki.org do not have an app integration here.
 - **Filman:** No supported documented integration was found. NOIR does not collect Filman credentials, scrape the site, resolve its links, or bypass CAPTCHA/DRM/access controls. Filman playback is not available.
 - **Series episodes:** TMDB supplies season/episode metadata only; those entries are not playable unless a separate authorized add-on supplies a direct stream.
+- **Add-on format:** Add-ons are declarative catalogs, not executable provider plugins. The current format does not map individual episode metadata to stream URLs. See the [add-on developer tutorial](docs/addon-development.md) for exact capabilities and limitations.
 - **Captions:** There is no bulk caption-source search service. Captions are available only when embedded in a stream or explicitly declared by an installed add-on.
 - **Device verification:** The APK builds and lint is run locally; no physical Fire TV device is attached for runtime testing.
 
