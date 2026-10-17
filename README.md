@@ -2,6 +2,12 @@
 
 NOIR is a native Android TV / Fire TV catalog and player for direct HTTP(S) streams that you are authorized to access. It has a TV-first interface with remote navigation, TMDB metadata/search, series seasons and episodes, My List, Continue Watching, official-service links, and user-installed JSON add-ons.
 
+## NOTICE
+This is the first version of the app (or i didnt delete the line)
+This app was made for polish language so thats why the providers are polish
+If the app doesnt work then its because of the beta (i mean beta now, 17.10.2026)
+**THIS APP IS VIBECODED!!!**
+
 ## Build on Windows 11
 
 Prerequisites: Android Studio with Android SDK Platform 35 and Build Tools, JDK 17, and accepted Android SDK licenses. The wrapper uses Gradle 8.9 and Android Gradle Plugin 8.7.2.
