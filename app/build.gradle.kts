@@ -8,7 +8,10 @@ val localProperties = Properties().apply {
     val file = rootProject.file("local.properties")
     if (file.exists()) file.inputStream().use(::load)
 }
-val tmdbKey = localProperties.getProperty("TMDB_API_KEY", "")
+val tmdbKey = providers.gradleProperty("TMDB_API_KEY")
+    .orElse(providers.environmentVariable("TMDB_API_KEY"))
+    .orElse(localProperties.getProperty("TMDB_API_KEY", ""))
+    .get()
 
 android {
     namespace = "tv.noirstream"
@@ -18,8 +21,8 @@ android {
         applicationId = "tv.noirstream"
         minSdk = 21
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.0.2"
         buildConfigField("String", "TMDB_API_KEY", "\"${tmdbKey.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
     }
 

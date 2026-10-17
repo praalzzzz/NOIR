@@ -596,6 +596,8 @@ public final class MainActivity extends Activity {
 
         switch (currentRoute) {
             case "search": renderSearch(); break;
+            case "movies": renderMediaCollection(false); break;
+            case "series": renderMediaCollection(true); break;
             case "list": renderMyList(); break;
             case "continue": renderContinueWatching(); break;
             case "providers": renderProviders(); break;
@@ -624,7 +626,8 @@ public final class MainActivity extends Activity {
         wordmark.addView(brandDot, dotParams);
         bar.addView(wordmark, new LinearLayout.LayoutParams(dp(138), -2));
 
-        String[][] nav = {{"Home", "home"}, {"Search", "search"}, {"Continue", "continue"},
+        String[][] nav = {{"Home", "home"}, {"Movies", "movies"}, {"Series", "series"},
+                {"Search", "search"}, {"Continue", "continue"},
                 {"My List", "list"}, {"Providers", "providers"}, {"Add-ons", "addons"}};
         for (String[] item : nav) {
             boolean selected = currentRoute.equals(item[1])
@@ -981,6 +984,25 @@ public final class MainActivity extends Activity {
         input.requestFocus();
     }
 
+    private void renderMediaCollection(boolean tv) {
+        content.setPadding(dp(64), dp(40), dp(64), dp(48));
+        content.addView(text(tv ? "Series" : "Movies", 34, TEXT, true));
+        TextView intro = text("Browse the live TMDB catalog when configured, with your saved and installed add-on titles alongside it.",
+                15, MUTED, false);
+        LinearLayout.LayoutParams introParams = new LinearLayout.LayoutParams(-1, -2);
+        introParams.topMargin = dp(8);
+        content.addView(intro, introParams);
+        List<Title> results = new ArrayList<>(tv ? series : popular);
+        for (Title item : savedTitles()) if (item.type.equals(tv ? "tv" : "movie")) results.add(item);
+        for (Title item : addonTitles.values()) if (item.type.equals(tv ? "tv" : "movie")) results.add(item);
+        if (results.isEmpty()) {
+            content.addView(text("No titles are available yet. Configure TMDB or install a compatible catalog add-on.",
+                    16, MUTED, false));
+        } else {
+            addSection(tv ? "Discover series" : "Discover movies", results, tv ? "series" : "movies");
+        }
+    }
+
     private void renderSearchResults(LinearLayout target, List<Title> items) {
         target.removeAllViews();
         if (query.trim().isEmpty()) {
@@ -1041,26 +1063,41 @@ public final class MainActivity extends Activity {
     private void searchLive(String term, LinearLayout results) {
         loadingSearch = true;
         renderSearchResults(results, filterStarter(term));
+        String selectedType = searchType;
         io.execute(() -> {
             try {
                 String encoded = URLEncoder.encode(term.trim(), StandardCharsets.UTF_8.name());
-                String selectedType = searchType;
                 String endpoint = "movie".equals(selectedType) ? "movie"
                         : "tv".equals(selectedType) ? "tv" : "multi";
-                JSONObject response = requestJson("/search/" + endpoint + "?query=" + encoded + "&include_adult=false");
                 String expectedType = "all".equals(selectedType) ? "multi" : selectedType;
-                List<Title> found = TmdbResultsParser.parse(response.optJSONArray("results"), expectedType);
+                Map<String, Title> deduplicated = new java.util.LinkedHashMap<>();
+                Exception lastFailure = null;
+                for (String language : new String[]{"pl-PL", "en-US"}) {
+                    try {
+                        JSONObject response = requestJson("/search/" + endpoint + "?query=" + encoded
+                                + "&include_adult=false&language=" + language);
+                        for (Title item : TmdbResultsParser.parse(response.optJSONArray("results"), expectedType)) {
+                            String key = item.type + ":" + item.id;
+                            if (!deduplicated.containsKey(key)) deduplicated.put(key, item);
+                        }
+                    } catch (Exception exception) {
+                        lastFailure = exception;
+                    }
+                }
+                if (deduplicated.isEmpty() && lastFailure != null) throw lastFailure;
+                List<Title> found = new ArrayList<>(deduplicated.values());
                 runOnUiThread(() -> {
                     if (!"search".equals(currentRoute) || !query.equals(term) || !searchType.equals(selectedType)) return;
                     results.removeAllViews();
-                    results.addView(text(found.isEmpty() ? "No TMDB matches." : "Results from TMDB", 20, TEXT, true));
+                    results.addView(text(found.isEmpty() ? "No TMDB matches in Polish or English."
+                            : "Results from TMDB  ·  Polski + English", 20, TEXT, true));
                     for (Title item : found) results.addView(searchResult(item));
                     loadingSearch = false;
                 });
             } catch (Exception exception) {
                 Log.w("NOIR", "TMDB search request failed (" + exception.getClass().getSimpleName() + ").");
                 runOnUiThread(() -> {
-                    if ("search".equals(currentRoute)) {
+                    if ("search".equals(currentRoute) && query.equals(term) && searchType.equals(selectedType)) {
                         loadingSearch = false;
                         renderSearchResults(results, filterStarter(term));
                         results.addView(text("Live search failed. Check your connection or TMDB key.", 14, MUTED, false));
@@ -2173,11 +2210,12 @@ public final class MainActivity extends Activity {
 
     private List<Title> filterStarter(String term, String type) {
         List<Title> found = new ArrayList<>();
-        String lower = term.trim().toLowerCase(Locale.ROOT);
+        String lower = SearchText.normalize(term);
         if (lower.isEmpty()) return found;
         for (Title item : starter) {
             if ((type.equals("all") || item.type.equals(type))
-                    && (item.name.toLowerCase(Locale.ROOT).contains(lower) || item.genres.toLowerCase(Locale.ROOT).contains(lower)))
+                    && (SearchText.normalize(item.name).contains(lower)
+                    || SearchText.normalize(item.genres).contains(lower)))
                 found.add(item);
         }
         return found;
