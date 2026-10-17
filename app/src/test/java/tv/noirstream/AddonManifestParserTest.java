@@ -64,6 +64,36 @@ public final class AddonManifestParserTest {
     }
 
     @Test
+    public void parsesSeriesWithExplicitPlayableEpisodeSources() throws Exception {
+        JSONObject manifest = new JSONObject().put("items", new JSONArray().put(new JSONObject()
+                .put("id", "sample-series")
+                .put("type", "tv")
+                .put("title", "Sample Series")
+                .put("episodes", new JSONArray().put(new JSONObject()
+                        .put("season", 1)
+                        .put("episode", 2)
+                        .put("title", "The Sample")
+                        .put("overview", "A fictional episode.")
+                        .put("stream", "https://media.example.org/series-s01e02.m3u8")
+                        .put("format", "hls")
+                        .put("subtitles", new JSONArray().put(new JSONObject()
+                                .put("language", "pl")
+                                .put("url", "https://media.example.org/series-s01e02.pl.srt")))))));
+
+        AddonManifestParser.Manifest parsed = AddonManifestParser.parse(manifest, "https://example.org/series.json");
+
+        AddonManifestParser.Item series = parsed.items.get(0);
+        assertEquals("tv", series.type);
+        assertTrue(series.stream.isEmpty());
+        assertEquals(1, series.episodes.size());
+        assertEquals(1, series.episodes.get(0).season);
+        assertEquals(2, series.episodes.get(0).number);
+        assertEquals("The Sample", series.episodes.get(0).title);
+        assertEquals("hls", series.episodes.get(0).format);
+        assertEquals("pl", series.episodes.get(0).subtitles.get(0).language);
+    }
+
+    @Test
     public void rejectsMissingItemsMalformedEntriesAndDuplicateIds() throws Exception {
         assertThrows(IllegalArgumentException.class,
                 () -> AddonManifestParser.parse(new JSONObject(), "https://example.org/addon.json"));
@@ -78,6 +108,30 @@ public final class AddonManifestParserTest {
                 .put(item("same", "https://media.example.org/second.mp4")));
         assertThrows(IllegalArgumentException.class,
                 () -> AddonManifestParser.parse(duplicateIds, "https://example.org/addon.json"));
+
+        JSONObject duplicateEpisodes = new JSONObject().put("items", new JSONArray().put(new JSONObject()
+                .put("type", "tv")
+                .put("title", "Sample Series")
+                .put("episodes", new JSONArray()
+                        .put(episode(1, 1, "First", "https://media.example.org/first.mp4"))
+                        .put(episode(1, 1, "Duplicate", "https://media.example.org/second.mp4")))));
+        assertThrows(IllegalArgumentException.class,
+                () -> AddonManifestParser.parse(duplicateEpisodes, "https://example.org/addon.json"));
+
+        JSONObject malformedEpisodes = new JSONObject().put("items", new JSONArray().put(new JSONObject()
+                .put("type", "tv")
+                .put("title", "Sample Series")
+                .put("episodes", "not-an-array")));
+        assertThrows(IllegalArgumentException.class,
+                () -> AddonManifestParser.parse(malformedEpisodes, "https://example.org/addon.json"));
+
+        JSONObject movieEpisodes = new JSONObject().put("items", new JSONArray().put(new JSONObject()
+                .put("title", "Sample Film")
+                .put("stream", "https://media.example.org/sample.mp4")
+                .put("episodes", new JSONArray().put(episode(1, 1, "Not a movie episode",
+                        "https://media.example.org/sample.mp4")))));
+        assertThrows(IllegalArgumentException.class,
+                () -> AddonManifestParser.parse(movieEpisodes, "https://example.org/addon.json"));
     }
 
     @Test
@@ -114,5 +168,10 @@ public final class AddonManifestParserTest {
 
     private JSONObject item(String id, String stream) throws Exception {
         return new JSONObject().put("id", id).put("title", "Sample").put("stream", stream);
+    }
+
+    private JSONObject episode(int season, int number, String title, String stream) throws Exception {
+        return new JSONObject().put("season", season).put("episode", number)
+                .put("title", title).put("stream", stream);
     }
 }

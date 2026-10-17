@@ -48,8 +48,22 @@ final class AddonManifestParser {
             }
             String stream = entry.optString("stream", "");
             String format = entry.optString("format", "").trim().toLowerCase(Locale.ROOT);
-            if (!MediaSourceValidator.isValidMediaSource(stream, format)) {
-                throw new IllegalArgumentException("Item " + (i + 1) + " needs a supported direct HTTP(S) media URL and format.");
+            boolean hasStream = !stream.trim().isEmpty();
+            if (hasStream && !MediaSourceValidator.isValidMediaSource(stream, format)) {
+                throw new IllegalArgumentException("Item " + (i + 1) + " has an unsupported direct HTTP(S) media URL or format.");
+            }
+            JSONArray episodeValues = entry.optJSONArray("episodes");
+            if (entry.has("episodes") && episodeValues == null) {
+                throw new IllegalArgumentException("Item " + (i + 1) + " episodes must be a JSON array.");
+            }
+            List<Episode> episodes = parseEpisodes(episodeValues, i + 1);
+            if ((!hasStream || !MediaSourceValidator.isValidMediaSource(stream, format))
+                    && !("tv".equals(type) && !episodes.isEmpty())) {
+                throw new IllegalArgumentException("Item " + (i + 1)
+                        + " needs a supported direct stream, or a TV series with episode streams.");
+            }
+            if (!"tv".equals(type) && !episodes.isEmpty()) {
+                throw new IllegalArgumentException("Item " + (i + 1) + " episodes are only valid for TV series.");
             }
 
             String itemId = entry.optString("id", String.valueOf(i)).trim();
@@ -70,7 +84,8 @@ final class AddonManifestParser {
             List<Subtitle> subtitles = parseSubtitles(entry.optJSONArray("subtitles"), i + 1);
             long generatedId = Integer.toUnsignedLong((source + ":" + itemId).hashCode()) + 1;
             parsedItems.add(new Item(generatedId, type, title, entry.optString("year", "—"),
-                    entry.optString("overview", ""), poster, backdrop, genres, stream, format, subtitles));
+                    entry.optString("overview", ""), poster, backdrop, genres,
+                    hasStream ? stream : "", hasStream ? format : "", subtitles, episodes));
         }
         return new Manifest(name, addonId, description, author, version, parsedItems);
     }
@@ -107,6 +122,42 @@ final class AddonManifestParser {
         return subtitles;
     }
 
+    private static List<Episode> parseEpisodes(JSONArray values, int itemNumber) {
+        List<Episode> episodes = new ArrayList<>();
+        if (values == null) return episodes;
+        if (values.length() == 0 || values.length() > 500) {
+            throw new IllegalArgumentException("Item " + itemNumber + " must contain 1–500 episode entries.");
+        }
+        Set<String> numbers = new HashSet<>();
+        for (int i = 0; i < values.length(); i++) {
+            JSONObject value = values.optJSONObject(i);
+            if (value == null) {
+                throw new IllegalArgumentException("Item " + itemNumber + " episode " + (i + 1) + " must be a JSON object.");
+            }
+            int season = value.optInt("season", -1);
+            int number = value.optInt("episode", -1);
+            String title = value.optString("title", "").trim();
+            if (season < 0 || season > 99 || number < 1 || number > 999
+                    || title.isEmpty() || title.length() > 200) {
+                throw new IllegalArgumentException("Item " + itemNumber + " episode " + (i + 1)
+                        + " needs a season from 0–99, episode number from 1–999, and a title of at most 200 characters.");
+            }
+            if (!numbers.add(season + ":" + number)) {
+                throw new IllegalArgumentException("Item " + itemNumber + " has a duplicate season and episode number.");
+            }
+            String stream = value.optString("stream", "");
+            String format = value.optString("format", "").trim().toLowerCase(Locale.ROOT);
+            if (!MediaSourceValidator.isValidMediaSource(stream, format)) {
+                throw new IllegalArgumentException("Item " + itemNumber + " episode " + (i + 1)
+                        + " needs a supported direct HTTP(S) media URL and format.");
+            }
+            List<Subtitle> subtitles = parseSubtitles(value.optJSONArray("subtitles"), itemNumber);
+            episodes.add(new Episode(season, number, title, value.optString("overview", ""),
+                    stream, format, subtitles));
+        }
+        return episodes;
+    }
+
     static final class Manifest {
         final String name;
         final String id;
@@ -137,9 +188,11 @@ final class AddonManifestParser {
         final String stream;
         final String format;
         final List<Subtitle> subtitles;
+        final List<Episode> episodes;
 
         Item(long id, String type, String title, String year, String overview, String poster,
-             String backdrop, List<String> genres, String stream, String format, List<Subtitle> subtitles) {
+             String backdrop, List<String> genres, String stream, String format, List<Subtitle> subtitles,
+             List<Episode> episodes) {
             this.id = id;
             this.type = type;
             this.title = title;
@@ -148,6 +201,28 @@ final class AddonManifestParser {
             this.poster = poster;
             this.backdrop = backdrop;
             this.genres = genres;
+            this.stream = stream;
+            this.format = format;
+            this.subtitles = subtitles;
+            this.episodes = episodes;
+        }
+    }
+
+    static final class Episode {
+        final int season;
+        final int number;
+        final String title;
+        final String overview;
+        final String stream;
+        final String format;
+        final List<Subtitle> subtitles;
+
+        Episode(int season, int number, String title, String overview, String stream, String format,
+                List<Subtitle> subtitles) {
+            this.season = season;
+            this.number = number;
+            this.title = title;
+            this.overview = overview;
             this.stream = stream;
             this.format = format;
             this.subtitles = subtitles;

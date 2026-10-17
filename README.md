@@ -3,10 +3,7 @@
 NOIR is a native Android TV / Fire TV catalog and player for direct HTTP(S) streams that you are authorized to access. It has a TV-first interface with remote navigation, TMDB metadata/search, series seasons and episodes, My List, Continue Watching, official-service links, and user-installed JSON add-ons.
 
 ## NOTICE
-This is the first version of the app (or i didnt delete the line)
-This app was made for polish language so thats why the providers are polish
-If the app doesnt work then its because of the beta (i mean beta now, 17.10.2026)
-**THIS APP IS VIBECODED!!!**
+NOIR is a TV-first catalog and player. Catalog availability, provider support, and stream playback depend on your region, network, device, and the sources you configure.
 
 ## Build on Windows 11
 
@@ -14,7 +11,7 @@ Prerequisites: Android Studio with Android SDK Platform 35 and Build Tools, JDK 
 
 1. Install Android Studio from <https://developer.android.com/studio>.
 2. Open this folder in Android Studio and let Gradle sync. Install SDK components if prompted.
-3. Live TMDB metadata is optional. In the project-root `local.properties`, set `TMDB_API_KEY=...`; do not commit or share that file. The file is machine-specific and is git-ignored.
+3. A TMDB key is optional. You can enter your personal key in NOIR on the TV, or configure a private development build using the project-root `local.properties`. Never commit or share a real key.
 4. From PowerShell in the project folder, run:
 
    ```powershell
@@ -24,7 +21,7 @@ Prerequisites: Android Studio with Android SDK Platform 35 and Build Tools, JDK 
 
 5. The debug APK is written to `app\build\outputs\apk\debug\app-debug.apk`.
 
-The APK contains the TMDB key at build time, so keep a personal build private. This is a debug build, not a Play Store release.
+The public APK has no bundled key. A key entered in NOIR is stored in that app installation; a key configured in `local.properties` is embedded in the build and makes that APK private. This is a debug build, not a Play Store release.
 
 ## Install on Fire TV
 
@@ -48,7 +45,8 @@ The APK contains the TMDB key at build time, so keep a personal build private. T
 - **Why/features:** Enables live discovery shelves, artwork and title metadata, title details, TV seasons/episodes, and online search. Without it, the included starter catalog and local search remain available.
 - **Where to obtain:** <https://www.themoviedb.org/settings/api>
 - **Price/licensing:** TMDB's developer API is free for non-commercial use with attribution according to its published FAQ; commercial use requires permission/licensing. Check the current [FAQ](https://developer.themoviedb.org/docs/faq) and [API terms](https://www.themoviedb.org/documentation/api/terms-of-use) before use.
-- **Configure:** Add `TMDB_API_KEY=your_key` to project-root `local.properties`, then rebuild. `local.properties.example` is a safe template; do not commit the real key.
+- **Configure on TV:** In NOIR, select the top-bar status (**CURATED EDITION** or **LIVE DISCOVERY**), paste your key, and select **Save and connect**. The key is stored in the app's private preferences on that device and is not uploaded to NOIR.
+- **Configure for a private build:** Add `TMDB_API_KEY=your_key` to project-root `local.properties` and rebuild. `local.properties.example` is a safe template; do not commit the real key or distribute that APK.
 - **Required?** No, not to build or browse the starter catalog. Required for live TMDB-backed features.
 
 No other API key is required by the app. There is no OpenSubtitles or other third-party caption API integration.
@@ -79,6 +77,23 @@ The **Add-ons** tab accepts an HTTP(S) URL or a local JSON document selected wit
           "url": "https://media.example.org/video.pl.vtt"
         }
       ]
+    },
+    {
+      "id": "sample-series",
+      "type": "tv",
+      "title": "My Series",
+      "year": "2025",
+      "overview": "A series with sources for individual episodes.",
+      "poster": "https://images.example.org/series-poster.jpg",
+      "episodes": [
+        {
+          "season": 1,
+          "episode": 1,
+          "title": "Pilot",
+          "stream": "https://media.example.org/series-s01e01.m3u8",
+          "format": "hls"
+        }
+      ]
     }
   ]
 }
@@ -92,8 +107,8 @@ The app blocks `magnet:`/torrent URLs and rejects URL query parameters that look
 
 - **Official services:** The Providers tab links to TVP VOD, Rakuten TV Free, Plex, South Park Studios, and JustWatch Polska. These are external links and leave NOIR; country, catalog, language, account, and Fire TV app availability can vary. JustWatch is a discovery guide, not a video player. CDA.pl and bajeczki.org do not have an app integration here.
 - **Filman:** No supported documented integration was found. NOIR does not collect Filman credentials, scrape the site, resolve its links, or bypass CAPTCHA/DRM/access controls. Filman playback is not available.
-- **Series episodes:** TMDB supplies season/episode metadata only; those entries are not playable unless a separate authorized add-on supplies a direct stream.
-- **Add-on format:** Add-ons are declarative catalogs, not executable provider plugins. The current format does not map individual episode metadata to stream URLs. See the [add-on developer tutorial](docs/addon-development.md) for exact capabilities and limitations.
+- **Series episodes:** TMDB supplies season/episode metadata only. Add-ons can declare their own series episodes and direct stream URLs; TMDB episodes are not automatically matched to a provider's streams.
+- **Add-on format:** Add-ons are declarative catalogs, not executable provider plugins. They can supply movie streams and explicit episode streams for a series; they cannot execute provider code or scrape/resolve website links. See the [add-on developer tutorial](docs/addon-development.md) for the schema and limitations.
 - **Captions:** There is no bulk caption-source search service. Captions are available only when embedded in a stream or explicitly declared by an installed add-on.
 - **Device verification:** The APK builds and lint is run locally; no physical Fire TV device is attached for runtime testing.
 

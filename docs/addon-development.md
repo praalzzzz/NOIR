@@ -2,14 +2,14 @@
 
 ## What an add-on is
 
-The current NOIR add-on format is a **declarative JSON catalog**, not an executable provider SDK. It describes titles and direct HTTP(S) media URLs that you own or are authorized to use. NOIR does not execute remote code, scrape websites, collect streaming credentials, resolve unsupported source pages, or bypass DRM or access controls.
+The current NOIR add-on format is a **declarative JSON catalog**, not an executable provider SDK. It describes movie and series titles, plus direct HTTP(S) media URLs that you own or are authorized to use. A series can list season/episode numbers and an explicit stream URL for each episode. NOIR does not execute remote code, scrape websites, collect streaming credentials, resolve unsupported source pages, or bypass DRM or access controls.
 
-An add-on can supply movie or series catalog entries and direct streams. It cannot currently register Java/Kotlin/JavaScript provider code, define an update registry, declare permissions, map a series' seasons and episodes to individual stream URLs, or specify a supported NOIR version. Series and episode metadata shown by the app comes from TMDB; it does not make an episode playable.
+An add-on can supply movie sources and custom series episode sources. TMDB can separately supply metadata, but NOIR does not automatically match TMDB episodes to add-on streams. An add-on cannot register Java/Kotlin/JavaScript provider code, define an update registry, declare permissions, or specify a supported NOIR version.
 
 ## Getting started
 
 1. Create a UTF-8 JSON file.
-2. Add an `items` array with at least one title and direct stream you control.
+2. Add an `items` array with at least one movie with a direct stream, or a TV series with one or more episode stream entries.
 3. Either host the file at an HTTP(S) URL reachable from the Android TV/Fire TV device (HTTPS recommended), or copy it to storage visible to the device.
 4. In NOIR, open **Add-ons** and enter the manifest URL, or choose **Choose local JSON manifest** in the system file picker.
 5. Review the catalog item, open its title, then choose **Try stream in NOIR**. The URL validator checks structure and policy; only the actual player can test reachability, codecs, and decoder support.
@@ -58,11 +58,14 @@ Item fields:
 | `poster` | No | Safe HTTP(S) artwork URL or an absolute path such as a TMDB image path. |
 | `backdrop` | No | Safe HTTP(S) artwork URL or absolute path; defaults to `poster`. |
 | `genres` | No | Array of up to 30 non-empty genre labels. |
-| `stream` | Yes | Direct HTTP(S) stream URL. It must pass NOIR's URL rules and either have a supported media extension or a supported `format`. |
+| `stream` | Movies: yes; TV: optional | Direct HTTP(S) title stream URL. It must pass NOIR's URL rules and either have a supported media extension or a supported `format`. A TV item can use `episodes` instead. |
 | `format` | No | `hls`, `dash`, or `progressive`. If omitted, NOIR infers HLS/DASH and common progressive formats from the URL path. |
 | `subtitles` | No | Array of external subtitle objects. Only WebVTT (`.vtt`) and SubRip (`.srt`) URLs are accepted. |
+| `episodes` | TV only | Array of 1–500 explicit episode entries. A TV item needs either a valid title `stream` or this non-empty array. |
 
 Each subtitle object has a required `url` and optional `language` (or `lang`) and `label`. Invalid subtitle entries invalidate the manifest item list rather than being silently accepted.
+
+Each episode object requires `season` (0–99), `episode` (1–999), `title`, and `stream`. Season/episode pairs must be unique within that series. `format` and `subtitles` follow the same rules as the title fields; `overview` is optional. The player opens the explicitly declared stream when the user selects **Play episode**.
 
 ### Valid fictional example
 
@@ -103,15 +106,16 @@ To create a minimal catalog, keep the `items` field and an item with `title` and
 
 ## Metadata and series behavior
 
-The app preserves a title's type, display name, year, overview, artwork paths, genres, add-on name, and source format. Missing artwork is allowed and rendered using the app's placeholder. `type: "tv"` categorizes an item as a series, but the current manifest schema has no `seasons` or `episodes` fields. A `stream` on a TV item is a single direct stream, not an episode map.
+The app preserves a title's type, display name, year, overview, artwork paths, genres, add-on name, and source format. Missing artwork is allowed and rendered using the app's placeholder. A TV item can define its own explicit `episodes` array, organized by season and episode number, and each entry can provide its own direct stream and subtitles. An optional title-level `stream` is still a single direct stream, not an episode map.
 
-TMDB supplies live catalog metadata, details, season lists, and episode metadata when a TMDB API key is configured. TMDB does not supply playable video. To play an episode, NOIR would need an authorized direct episode stream and a supported episode-to-source mapping; that mapping is not part of this add-on format yet.
+TMDB supplies live catalog metadata, details, season lists, and episode metadata when a TMDB API key is configured. Enter a personal key by selecting the catalog status (**CURATED EDITION** or **LIVE DISCOVERY**) in the TV app header; it is stored in app-private preferences on that device. TMDB does not supply playable video. TMDB episode listings are metadata only; use the add-on `episodes` mapping to supply an authorized stream for each playable episode.
 
 ## Testing and debugging
 
 - Test with fictional metadata and placeholder URLs first; do not label mock data as a real integration.
 - Use a URL reachable from the TV, not merely from the development computer.
 - Reinstall or use **Refresh** after publishing a manifest change.
+- For a series, add an `episodes` entry with a distinct season/episode number and a direct source for every episode you want to play. TMDB metadata alone does not provide those streams.
 - Validation errors appear in the Add-ons screen. A manifest that passes validation may still point to an unavailable stream or unsupported codec.
 - Select **Try stream in NOIR** to test playback. ExoPlayer reports network, format, and decoder failures in the app.
 - Device logs can be inspected with `adb logcat -s NOIR`.

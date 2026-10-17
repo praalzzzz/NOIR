@@ -119,6 +119,7 @@ public final class MainActivity extends Activity {
     private String catalogMessage = "";
     private boolean loadingSearch;
     private boolean liveCatalogLoaded;
+    private int tmdbCatalogGeneration;
     private ExoPlayer player;
     private PlayerView playerView;
     private Title playingTitle;
@@ -289,6 +290,7 @@ public final class MainActivity extends Activity {
                         item.streamFormat = entry.format;
                         item.addonName = parsed.name;
                         item.manifestUrl = manifestUrl;
+                        item.addonEpisodes = entry.episodes;
                         for (AddonManifestParser.Subtitle subtitle : entry.subtitles) {
                             item.subtitles.add(new SubtitleTrack(subtitle.language, subtitle.label, subtitle.url));
                         }
@@ -652,22 +654,91 @@ public final class MainActivity extends Activity {
         View statusDot = new View(this);
         statusDot.setBackground(rounded(GOLD, 5));
         status.addView(statusDot, new LinearLayout.LayoutParams(dp(7), dp(7)));
-        TextView live = text(BuildConfig.TMDB_API_KEY.isEmpty() ? "CURATED EDITION" : "LIVE DISCOVERY",
+        TextView live = text(tmdbApiKey().isEmpty() ? "CURATED EDITION" : "LIVE DISCOVERY",
                 10, TEXT, true);
         live.setLetterSpacing(.08f);
         LinearLayout.LayoutParams liveParams = new LinearLayout.LayoutParams(-2, -2);
         liveParams.leftMargin = dp(8);
         status.addView(live, liveParams);
+        status.setFocusable(true);
+        status.setBackground(focusBackground(18, Color.rgb(23, 25, 27)));
+        addFocusAnimation(status);
+        status.setOnClickListener(v -> showTmdbKeyDialog());
+        status.setContentDescription("TMDB API settings");
         bar.addView(status, new LinearLayout.LayoutParams(-2, dp(36)));
         return bar;
+    }
+
+    private String tmdbApiKey() {
+        if (preferences.contains("tmdb_api_key")) {
+            return preferences.getString("tmdb_api_key", "").trim();
+        }
+        return BuildConfig.TMDB_API_KEY.trim();
+    }
+
+    private void showTmdbKeyDialog() {
+        EditText input = new EditText(this);
+        configureInput(input, "Paste your TMDB v3 API key");
+        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        input.setSingleLine(true);
+        input.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        LinearLayout wrapper = new LinearLayout(this);
+        wrapper.setPadding(dp(24), dp(8), dp(24), 0);
+        wrapper.addView(input, new LinearLayout.LayoutParams(-1, dp(56)));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("TMDB setup")
+                .setMessage("A personal key enables live catalogs, search, title details, and series metadata. It is saved in this app's private preferences and sent directly to TMDB over HTTPS. It remains a client key and can be extracted by someone with access to the device.")
+                .setView(wrapper)
+                .setPositiveButton("Save and connect", null)
+                .setNeutralButton("Clear key", null)
+                .setNegativeButton("Cancel", null)
+                .create();
+        dialog.setOnShowListener(ignored -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                String key = input.getText().toString().trim();
+                if (key.isEmpty() || key.length() > 256 || key.matches(".*\\s+.*")) {
+                    input.setError("Enter a valid TMDB API key without spaces.");
+                    return;
+                }
+                preferences.edit().putString("tmdb_api_key", key).apply();
+                dialog.dismiss();
+                refreshTmdbCatalog();
+            });
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+                preferences.edit().putString("tmdb_api_key", "").apply();
+                dialog.dismiss();
+                refreshTmdbCatalog();
+            });
+            input.requestFocus();
+        });
+        dialog.show();
+    }
+
+    private void refreshTmdbCatalog() {
+        detailsRequested.clear();
+        detailFailures.clear();
+        seasonsRequested.clear();
+        activeSeasonRequests.clear();
+        liveCatalogLoaded = false;
+        trending = selectType(false);
+        popular = selectType(false);
+        series = selectType(true);
+        newTitles = selectType(false);
+        animation = selectAnimation();
+        catalogMessage = tmdbApiKey().isEmpty()
+                ? "TMDB key cleared · showing the starter collection"
+                : "Connecting to TMDB for live discovery…";
+        loadLiveCatalog();
+        render();
     }
 
     private void renderHome() {
         content.setPadding(0, 0, 0, dp(42));
         content.addView(buildHero(featured()), new LinearLayout.LayoutParams(-1, heroHeight()));
         TextView status = text(catalogMessage.isEmpty()
-                ? (BuildConfig.TMDB_API_KEY.isEmpty()
-                    ? "A hand-picked starter collection · Add your TMDB key for live discovery"
+                ? (tmdbApiKey().isEmpty()
+                    ? "A hand-picked starter collection · Select the catalog status above to configure TMDB"
                     : "Connecting to TMDB for live discovery…")
                 : catalogMessage, 13, MUTED, false);
         status.setPadding(dp(64), dp(8), dp(64), dp(2));
@@ -845,7 +916,7 @@ public final class MainActivity extends Activity {
     private void renderSearch() {
         content.setPadding(dp(64), dp(40), dp(64), dp(46));
         content.addView(text("Find your next story", 32, TEXT, true));
-        TextView hint = text(BuildConfig.TMDB_API_KEY.isEmpty()
+        TextView hint = text(tmdbApiKey().isEmpty()
                 ? "Search the starter collection offline, or add a TMDB key for the full catalog."
                 : "Search films and series across the live catalog.", 15, MUTED, false);
         LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
@@ -875,7 +946,7 @@ public final class MainActivity extends Activity {
             TextView filter = actionButton(option[0], searchType.equals(option[1]), () -> {
                 searchType = option[1];
                 render();
-                if (!BuildConfig.TMDB_API_KEY.isEmpty() && query.trim().length() >= 2) {
+                if (!tmdbApiKey().isEmpty() && query.trim().length() >= 2) {
                     LinearLayout refreshedResults = findSearchResults();
                     if (refreshedResults != null) searchLive(query, refreshedResults);
                 }
@@ -895,14 +966,14 @@ public final class MainActivity extends Activity {
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
                 query = s.toString();
                 renderSearchResults(results, filterStarter(query));
-                if (!BuildConfig.TMDB_API_KEY.isEmpty() && query.trim().length() >= 2) searchLive(query, results);
+                if (!tmdbApiKey().isEmpty() && query.trim().length() >= 2) searchLive(query, results);
             }
             @Override public void afterTextChanged(Editable s) { }
         });
         input.setOnEditorActionListener((v, actionId, event) -> {
             if (actionId == EditorInfo.IME_ACTION_SEARCH || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
                 hideKeyboard(input);
-                if (!BuildConfig.TMDB_API_KEY.isEmpty()) searchLive(query, results);
+                if (!tmdbApiKey().isEmpty()) searchLive(query, results);
                 return true;
             }
             return false;
@@ -1053,6 +1124,16 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(1020), -2);
         ip.topMargin = dp(12);
         content.addView(intro, ip);
+        TextView customSources = actionButton("Add your own movie and episode sources", true,
+                () -> {
+                    history.clear();
+                    currentRoute = "addons";
+                    query = "";
+                    render();
+                });
+        LinearLayout.LayoutParams customSourcesParams = new LinearLayout.LayoutParams(dp(390), dp(48));
+        customSourcesParams.topMargin = dp(14);
+        content.addView(customSources, customSourcesParams);
         addOfficialService("TVP VOD", "Polish public broadcaster · free and paid titles; availability varies",
                 "https://vod.tvp.pl/");
         addOfficialService("Rakuten TV Free", "Ad-supported selection · supported titles vary by country",
@@ -1147,7 +1228,7 @@ public final class MainActivity extends Activity {
     private void renderAddons() {
         content.setPadding(dp(64), dp(44), dp(64), dp(52));
         content.addView(text("Add-ons", 34, TEXT, true));
-        TextView summary = text("Add a remote or local JSON manifest for streams you own or are authorized to watch. NOIR does not execute add-on code, scrape websites, or store provider passwords.", 15, MUTED, false);
+        TextView summary = text("Add a remote or local JSON manifest for movie sources or your own series episodes and direct streams. NOIR does not execute add-on code, scrape websites, or store provider passwords.", 15, MUTED, false);
         summary.setMaxWidth(dp(900));
         LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(dp(920), -2);
         summaryParams.topMargin = dp(10);
@@ -1272,9 +1353,9 @@ public final class MainActivity extends Activity {
 
         List<View> sections = new ArrayList<>();
         sections.add(addGuideSection("01  Getting started",
-                "Create a UTF-8 JSON file and host it at an HTTP(S) URL reachable from your TV. This format describes titles and direct streams; it is not a JavaScript, binary, scraping, or executable provider SDK. TV seasons and episode metadata come from TMDB. The current add-on format does not map episode entries to stream URLs."));
+                "Create a UTF-8 JSON file and host it at an HTTP(S) URL reachable from your TV. This format describes titles and direct streams; it is not a JavaScript, binary, scraping, or executable provider SDK. TV items can declare their own season and episode numbers with a direct stream URL for each episode. TMDB metadata does not provide playable streams."));
         sections.add(addGuideSection("02  Manifest fields",
-                "Root: name (optional, max 120 characters), id (optional stable identifier containing letters, numbers, dot, underscore or hyphen), description (optional, max 500), author (optional, max 120), version (optional, max 64), and items (required, 1–100 objects). Item: id (unique within the manifest), type (movie or tv; defaults to movie), title (required, max 200), year, overview, poster, backdrop, genres (string array), stream (required direct HTTP(S) URL), format (hls, dash, progressive, or omitted when a supported extension identifies it), and subtitles (WebVTT/SRT URLs with optional language and label). The manifest is limited to 1 MB. Unknown fields are ignored; there are no permission, entry-point, registry, or NOIR-version fields."));
+                "Root: name (optional, max 120 characters), id (optional stable identifier containing letters, numbers, dot, underscore or hyphen), description (optional, max 500), author (optional, max 120), version (optional, max 64), and items (required, 1–100 objects). Item: id (unique within the manifest), type (movie or tv; defaults to movie), title (required, max 200), year, overview, poster, backdrop, genres (string array), stream (required for movies; optional for series with episodes), format (hls, dash, progressive, or omitted when a supported extension identifies it), and subtitles (WebVTT/SRT URLs with optional language and label). TV items can declare 1–500 episodes with season, episode, title, stream, optional format, overview, and subtitles. The manifest is limited to 1 MB. Unknown fields are ignored; there are no permission, entry-point, registry, or NOIR-version fields."));
         String example = "{\n"
                 + "  \"id\": \"example.library\",\n"
                 + "  \"name\": \"Example authorized library\",\n"
@@ -1292,6 +1373,11 @@ public final class MainActivity extends Activity {
                 + "    \"stream\": \"https://media.example.org/sample.m3u8\",\n"
                 + "    \"format\": \"hls\",\n"
                 + "    \"subtitles\": [{\"language\": \"en\", \"label\": \"English\", \"url\": \"https://media.example.org/sample.vtt\"}]\n"
+                + "  }, {\n"
+                + "    \"id\": \"sample-series\",\n"
+                + "    \"type\": \"tv\",\n"
+                + "    \"title\": \"Sample Series\",\n"
+                + "    \"episodes\": [{\"season\": 1, \"episode\": 1, \"title\": \"Pilot\", \"stream\": \"https://media.example.org/series-s01e01.m3u8\", \"format\": \"hls\"}]\n"
                 + "  }]\n"
                 + "}";
         addGuideCode(example);
@@ -1690,17 +1776,21 @@ public final class MainActivity extends Activity {
                 () -> toggleSaved(item)), new LinearLayout.LayoutParams(dp(180), dp(52)));
         content.addView(hero, new LinearLayout.LayoutParams(-1, dp(475)));
 
-        if (item.type.equals("tv") && item.id > 0 && !BuildConfig.TMDB_API_KEY.isEmpty()
+        if (item.type.equals("tv") && !item.addonEpisodes.isEmpty()) {
+            addAddonEpisodes(item);
+        } else if (item.manifestUrl == null && item.type.equals("tv") && item.id > 0
+                && !tmdbApiKey().isEmpty()
                 && seasonsRequested.add(item.key())) {
             loadSeasons(item);
         }
-        if (item.id > 0 && !BuildConfig.TMDB_API_KEY.isEmpty() && detailsRequested.add(item.key())) loadDetails(item);
+        if (item.manifestUrl == null && item.id > 0 && !tmdbApiKey().isEmpty()
+                && detailsRequested.add(item.key())) loadDetails(item);
         if (detailFailures.contains(item.key())) {
             TextView error = text("Live title details could not be loaded. The available starter information is shown.", 14, MUTED, false);
             error.setPadding(dp(64), dp(12), dp(64), dp(6));
             content.addView(error);
         }
-        if (!hasAvailableSource(item)) addProviderAvailability(item);
+        if (!hasAvailableSource(item) && item.addonEpisodes.isEmpty()) addProviderAvailability(item);
         if (!item.similar.isEmpty()) addSection("More like this", item.similar, "similar");
     }
 
@@ -1880,21 +1970,98 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void addAddonEpisodes(Title item) {
+        LinearLayout section = new LinearLayout(this);
+        section.setOrientation(LinearLayout.VERTICAL);
+        section.setPadding(dp(64), dp(24), dp(48), dp(10));
+        section.addView(text("Episodes from " + item.addonName, 23, TEXT, true));
+        List<Integer> seasons = new ArrayList<>();
+        for (AddonManifestParser.Episode episode : item.addonEpisodes) {
+            if (!seasons.contains(episode.season)) seasons.add(episode.season);
+        }
+        Collections.sort(seasons);
+        LinearLayout choices = new LinearLayout(this);
+        choices.setPadding(0, dp(14), 0, dp(8));
+        HorizontalScrollView seasonScroll = new HorizontalScrollView(this);
+        seasonScroll.setHorizontalScrollBarEnabled(false);
+        seasonScroll.addView(choices);
+        section.addView(seasonScroll);
+        content.addView(section);
+        for (Integer season : seasons) {
+            TextView choice = actionButton(season == 0 ? "Specials" : "Season " + season,
+                    season.equals(seasons.get(0)), () -> renderAddonEpisodesForSeason(item, season, section));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, dp(48));
+            params.rightMargin = dp(10);
+            choices.addView(choice, params);
+        }
+        renderAddonEpisodesForSeason(item, seasons.get(0), section);
+    }
+
+    private void renderAddonEpisodesForSeason(Title seriesTitle, int season, LinearLayout section) {
+        while (section.getChildCount() > 2) section.removeViewAt(2);
+        for (AddonManifestParser.Episode episode : seriesTitle.addonEpisodes) {
+            if (episode.season != season) continue;
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.HORIZONTAL);
+            card.setGravity(Gravity.CENTER_VERTICAL);
+            card.setPadding(dp(16), dp(10), dp(14), dp(10));
+            card.setBackground(rounded(PANEL, 12));
+            LinearLayout copy = new LinearLayout(this);
+            copy.setOrientation(LinearLayout.VERTICAL);
+            String label = String.format(Locale.US, "S%02d E%02d  ·  %s",
+                    episode.season, episode.number, episode.title);
+            copy.addView(text(label, 16, TEXT, true));
+            if (!episode.overview.isEmpty()) {
+                TextView overview = text(episode.overview, 13, MUTED, false);
+                overview.setMaxLines(2);
+                LinearLayout.LayoutParams overviewParams = new LinearLayout.LayoutParams(-1, -2);
+                overviewParams.topMargin = dp(5);
+                copy.addView(overview, overviewParams);
+            }
+            card.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
+            card.addView(actionButton("Play episode   ▶", true,
+                    () -> startPlayback(createEpisodeTitle(seriesTitle, episode))),
+                    new LinearLayout.LayoutParams(dp(190), dp(46)));
+            LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(dp(820), -2);
+            cardParams.topMargin = dp(8);
+            section.addView(card, cardParams);
+        }
+    }
+
+    private Title createEpisodeTitle(Title seriesTitle, AddonManifestParser.Episode episode) {
+        String name = String.format(Locale.US, "S%02d E%02d · %s",
+                episode.season, episode.number, episode.title);
+        Title item = new Title(seriesTitle.id, "tv", name, seriesTitle.year, episode.overview,
+                seriesTitle.posterPath, seriesTitle.backdropPath, seriesTitle.genres, null, null);
+        item.streamUri = episode.stream;
+        item.streamFormat = episode.format;
+        item.addonName = seriesTitle.addonName;
+        item.manifestUrl = seriesTitle.manifestUrl;
+        for (AddonManifestParser.Subtitle subtitle : episode.subtitles) {
+            item.subtitles.add(new SubtitleTrack(subtitle.language, subtitle.label, subtitle.url));
+        }
+        return item;
+    }
+
     private void loadLiveCatalog() {
-        if (BuildConfig.TMDB_API_KEY.isEmpty()) return;
+        final int generation = ++tmdbCatalogGeneration;
+        final String apiKey = tmdbApiKey();
+        if (apiKey.isEmpty()) return;
         io.execute(() -> {
             try {
-                JSONObject trendingResponse = requestJson("/trending/movie/week");
-                JSONObject popularResponse = requestJson("/movie/popular");
-                JSONObject seriesResponse = requestJson("/tv/popular");
-                JSONObject recentResponse = requestJson("/movie/now_playing");
-                JSONObject animationResponse = requestJson("/discover/movie?with_genres=16&sort_by=popularity.desc");
+                JSONObject trendingResponse = requestJson("/trending/movie/week", apiKey);
+                JSONObject popularResponse = requestJson("/movie/popular", apiKey);
+                JSONObject seriesResponse = requestJson("/tv/popular", apiKey);
+                JSONObject recentResponse = requestJson("/movie/now_playing", apiKey);
+                JSONObject animationResponse = requestJson(
+                        "/discover/movie?with_genres=16&sort_by=popularity.desc", apiKey);
                 List<Title> liveTrending = TmdbResultsParser.parse(trendingResponse.optJSONArray("results"), "movie");
                 List<Title> livePopular = TmdbResultsParser.parse(popularResponse.optJSONArray("results"), "movie");
                 List<Title> liveSeries = TmdbResultsParser.parse(seriesResponse.optJSONArray("results"), "tv");
                 List<Title> liveRecent = TmdbResultsParser.parse(recentResponse.optJSONArray("results"), "movie");
                 List<Title> liveAnimation = TmdbResultsParser.parse(animationResponse.optJSONArray("results"), "movie");
                 runOnUiThread(() -> {
+                    if (generation != tmdbCatalogGeneration) return;
                     trending = liveTrending;
                     popular = livePopular;
                     series = liveSeries;
@@ -1907,6 +2074,7 @@ public final class MainActivity extends Activity {
             } catch (Exception exception) {
                 Log.w("NOIR", "TMDB catalog request failed (" + exception.getClass().getSimpleName() + ").");
                 runOnUiThread(() -> {
+                    if (generation != tmdbCatalogGeneration) return;
                     catalogMessage = "Live catalog unavailable · showing the starter collection";
                     if ("home".equals(currentRoute)) render();
                 });
@@ -1915,9 +2083,13 @@ public final class MainActivity extends Activity {
     }
 
     private JSONObject requestJson(String path) throws Exception {
+        return requestJson(path, tmdbApiKey());
+    }
+
+    private JSONObject requestJson(String path, String apiKey) throws Exception {
         String separator = path.contains("?") ? "&" : "?";
         URL url = new URL("https://api.themoviedb.org/3" + path + separator + "api_key="
-                + URLEncoder.encode(BuildConfig.TMDB_API_KEY, StandardCharsets.UTF_8.name()));
+                + URLEncoder.encode(apiKey, StandardCharsets.UTF_8.name()));
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setRequestMethod("GET");
         connection.setConnectTimeout(9000);
@@ -1983,6 +2155,11 @@ public final class MainActivity extends Activity {
     }
 
     private Title featured() {
+        if (!liveCatalogLoaded) {
+            for (Title item : series) {
+                if ("Stranger Things".equals(item.name)) return item;
+            }
+        }
         for (Title item : trending) {
             if (item.backdropPath != null && !item.backdropPath.isEmpty()
                     && !item.backdropPath.equals(item.posterPath)) return item;
@@ -2215,6 +2392,7 @@ public final class MainActivity extends Activity {
         String streamFormat = "";
         String addonName;
         String manifestUrl;
+        List<AddonManifestParser.Episode> addonEpisodes = Collections.emptyList();
         List<SubtitleTrack> subtitles = new ArrayList<>();
         List<Title> similar = Collections.emptyList();
 
