@@ -33,15 +33,16 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
 import android.widget.EditText;
-import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
-import android.widget.Toast;
+import android.widget.FrameLayout;
 import android.webkit.WebView;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -82,11 +83,11 @@ import java.util.concurrent.ConcurrentHashMap;
 @UnstableApi
 public final class MainActivity extends Activity {
     private static final int REQUEST_PICK_ADDON_MANIFEST = 101;
-    private static final int BG = Color.rgb(7, 8, 10);
-    private static final int PANEL = Color.rgb(20, 22, 26);
-    private static final int TEXT = Color.rgb(248, 249, 246);
-    private static final int MUTED = Color.rgb(151, 156, 165);
-    private static final int GOLD = Color.rgb(210, 246, 91);
+    private static final int BG = 0x08090B;
+    private static final int PANEL = 0x0D0F12;
+    private static final int TEXT = 0xF1EDE4;
+    private static final int MUTED = 0x8C9099;
+    private static final int GOLD = 0xD8B579;
     private static final String TMDB_IMAGE = "https://image.tmdb.org/t/p/";
     private final ExecutorService io = Executors.newFixedThreadPool(4);
     private final LruCache<String, Bitmap> imageCache =
@@ -122,6 +123,7 @@ public final class MainActivity extends Activity {
     private int tmdbCatalogGeneration;
     private ExoPlayer player;
     private PlayerView playerView;
+    private WebView playerWebView;
     private Title playingTitle;
     private Handler playbackHandler;
     private String addonMessage = "";
@@ -1546,17 +1548,13 @@ public final class MainActivity extends Activity {
             render();
             return;
         }
+
+        releasePlayer();
         FrameLayout screen = new FrameLayout(this);
         screen.setBackgroundColor(Color.BLACK);
         setContentView(screen);
-        playerView = new PlayerView(this);
-        playerView.setUseController(true);
-        playerView.setControllerAutoShow(true);
-        playerView.setControllerShowTimeoutMs(5000);
-        playerView.setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS);
-        playerView.setKeepScreenOn(true);
-        screen.addView(playerView, new FrameLayout.LayoutParams(-1, -1));
 
+        // Shared Header
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
         top.setPadding(dp(28), dp(22), dp(28), dp(12));
@@ -1577,49 +1575,79 @@ public final class MainActivity extends Activity {
         source.setLetterSpacing(.08f);
         top.addView(source, new LinearLayout.LayoutParams(-2, -2));
 
+        // Track Selection (Only for DIRECT playback as WebView tracks are hard to control)
         LinearLayout tracks = new LinearLayout(this);
         tracks.setPadding(0, 0, dp(34), dp(34));
         FrameLayout.LayoutParams tracksParams = new FrameLayout.LayoutParams(-2, dp(58),
                 Gravity.BOTTOM | Gravity.END);
         screen.addView(tracks, tracksParams);
-        TextView captions = actionButton("CC  Captions", false, () -> showTrackPicker(C.TRACK_TYPE_TEXT));
-        tracks.addView(captions, new LinearLayout.LayoutParams(dp(176), dp(46)));
-        View gap = new View(this);
-        tracks.addView(gap, new LinearLayout.LayoutParams(dp(9), 1));
-        TextView audio = actionButton("♫  Audio", false, () -> showTrackPicker(C.TRACK_TYPE_AUDIO));
-        tracks.addView(audio, new LinearLayout.LayoutParams(dp(148), dp(46)));
+        if (item.playbackType == PlaybackType.DIRECT) {
+            TextView captions = actionButton("CC  Captions", false, () -> showTrackPicker(C.TRACK_TYPE_TEXT));
+            tracks.addView(captions, new LinearLayout.LayoutParams(dp(176), dp(46)));
+            View gap = new View(this);
+            tracks.addView(gap, new LinearLayout.LayoutParams(dp(9), 1));
+            TextView audio = actionButton("♫  Audio", false, () -> showTrackPicker(C.TRACK_TYPE_AUDIO));
+            tracks.addView(audio, new LinearLayout.LayoutParams(dp(148), dp(46)));
+        }
 
         playingTitle = item;
-        player = new ExoPlayer.Builder(this).build();
-        playerView.setPlayer(player);
-        player.addListener(new Player.Listener() {
-            @Override
-            public void onPlaybackStateChanged(int state) {
-                if (state == Player.STATE_ENDED) {
-                    continuePositions.remove(item.key());
-                    persistContinuePositions();
-                    showMessage("Finished", "Playback reached the end of this stream.");
-                }
-            }
 
-            @Override
-            public void onPlayerError(PlaybackException error) {
-                String errorName = PlaybackException.getErrorCodeName(error.errorCode);
-                Log.w("NOIR", "Media3 playback failed (" + errorName + ").");
-                String message = "Playback failed (" + errorName
-                        + "). Verify that the direct HTTP(S) stream is reachable and uses a supported format and codec.";
-                showMessage("Playback error", message);
-            }
-        });
-        Long savedPosition = continuePositions.get(item.key());
-        long resumePosition = savedPosition == null ? 0L : savedPosition;
-        MediaItem mediaItem = buildMediaItem(item);
-        if (resumePosition > 0) player.setMediaItem(mediaItem, resumePosition);
-        else player.setMediaItem(mediaItem);
-        player.prepare();
-        player.play();
-        playbackHandler.removeCallbacks(playbackProgressSaver);
-        playbackHandler.postDelayed(playbackProgressSaver, 5000);
+        if (item.playbackType == PlaybackType.EMBED) {
+            // EMBED playback via WebView
+            playerWebView = new WebView(this);
+            playerWebView.setWebChromeClient(new android.webkit.WebChromeClient());
+            playerWebView.setWebViewClient(new android.webkit.WebViewClient());
+            WebSettings settings = playerWebView.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setDomStorageEnabled(true);
+            settings.setMediaPlaybackRequiresUserGesture(false);
+            settings.setLoadWithOverviewMode(true);
+            settings.setUseWideViewPort(true);
+            playerWebView.loadUrl(item.streamUri);
+            screen.addView(playerWebView, new FrameLayout.LayoutParams(-1, -1));
+        } else {
+            // DIRECT playback via ExoPlayer
+            playerView = new PlayerView(this);
+            playerView.setUseController(true);
+            playerView.setControllerAutoShow(true);
+            playerView.setControllerShowTimeoutMs(5000);
+            playerView.setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS);
+            playerView.setKeepScreenOn(true);
+            screen.addView(playerView, new FrameLayout.LayoutParams(-1, -1));
+
+            player = new ExoPlayer.Builder(this).build();
+            playerView.setPlayer(player);
+            player.addListener(new Player.Listener() {
+                @Override
+                public void onPlaybackStateChanged(int state) {
+                    if (state == Player.STATE_ENDED) {
+                        continuePositions.remove(item.key());
+                        persistContinuePositions();
+                        showMessage("Finished", "Playback reached the end of this stream.");
+                    }
+                }
+
+                @Override
+                public void onPlayerError(PlaybackException error) {
+                    String errorName = PlaybackException.getErrorCodeName(error.errorCode);
+                    Log.w("NOIR", "Media3 playback failed (" + errorName + ").");
+                    String message = "Playback failed (" + errorName
+                            + "). Verify that the direct HTTP(S) stream is reachable and uses a supported format and codec.";
+                    showMessage("Playback error", message);
+                }
+            });
+
+            Long savedPosition = continuePositions.get(item.key());
+            long resumePosition = savedPosition == null ? 0L : savedPosition;
+            MediaItem mediaItem = buildMediaItem(item);
+            if (resumePosition > 0) player.setMediaItem(mediaItem, resumePosition);
+            else player.setMediaItem(mediaItem);
+            player.prepare();
+            player.play();
+            playbackHandler.removeCallbacks(playbackProgressSaver);
+            playbackHandler.postDelayed(playbackProgressSaver, 5000);
+        }
+
         back.requestFocus();
     }
 
@@ -1704,6 +1732,14 @@ public final class MainActivity extends Activity {
             showMessage("Playback unavailable", "This stream is invalid or its add-on is disabled.");
             return;
         }
+        if (item.playbackType == PlaybackType.DIRECT && (item.streamUri == null || item.streamUri.isEmpty())) {
+            item.playbackType = PlaybackType.EMBED;
+            if (item.type.equals("tv")) {
+                item.streamUri = "https://vidlink.pro/tv/" + item.id;
+            } else {
+                item.streamUri = "https://vidlink.pro/movie/" + item.id;
+            }
+        }
         knownTitles.put(item.key(), item);
         push("player", item.key());
     }
@@ -1751,6 +1787,7 @@ public final class MainActivity extends Activity {
             object.put("format", item.streamFormat);
             object.put("addon", item.addonName);
             object.put("manifest", item.manifestUrl);
+            object.put("playbackType", item.playbackType.name());
             JSONArray subtitles = new JSONArray();
             for (SubtitleTrack subtitle : item.subtitles) {
                 JSONObject track = new JSONObject();
@@ -1776,6 +1813,10 @@ public final class MainActivity extends Activity {
     }
 
     private boolean hasAvailableSource(Title item) {
+        if (item == null) return false;
+        if (item.playbackType == PlaybackType.EMBED) {
+            return item.manifestUrl == null || addonRegistry.isEnabled(item.manifestUrl);
+        }
         return item != null && isValidMediaSource(item.streamUri, item.streamFormat)
                 && (item.manifestUrl == null || addonRegistry.isEnabled(item.manifestUrl));
     }
@@ -1797,6 +1838,11 @@ public final class MainActivity extends Activity {
             playerView = null;
             player.release();
             player = null;
+        }
+        if (playerWebView != null) {
+            playerWebView.stopLoading();
+            playerWebView.destroy();
+            playerWebView = null;
         }
         playingTitle = null;
     }
@@ -2433,6 +2479,8 @@ public final class MainActivity extends Activity {
         return (int) (value * getResources().getDisplayMetrics().density + .5f);
     }
 
+    public enum PlaybackType { DIRECT, EMBED }
+
     private static final class Route {
         final String name;
         final String query;
@@ -2492,12 +2540,19 @@ public final class MainActivity extends Activity {
         List<AddonManifestParser.Episode> addonEpisodes = Collections.emptyList();
         List<SubtitleTrack> subtitles = new ArrayList<>();
         List<Title> similar = Collections.emptyList();
+        PlaybackType playbackType = PlaybackType.DIRECT;
 
         Title(long id, String type, String name, String year, String overview, String posterPath,
               String backdropPath, String genres, Double rating, Integer runtime) {
             this.id = id; this.type = type; this.name = name; this.year = year; this.overview = overview;
             this.posterPath = posterPath; this.backdropPath = backdropPath; this.genres = genres;
             this.rating = rating; this.runtime = runtime;
+        }
+
+        Title(long id, String type, String name, String year, String overview, String posterPath,
+              String backdropPath, String genres, Double rating, Integer runtime, PlaybackType playbackType) {
+            this(id, type, name, year, overview, posterPath, backdropPath, genres, rating, runtime);
+            this.playbackType = playbackType;
         }
         String key() { return type + ":" + id + ":" + name; }
         String posterUrl(String size) {
