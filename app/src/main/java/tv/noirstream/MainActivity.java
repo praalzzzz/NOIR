@@ -262,7 +262,12 @@ public final class MainActivity extends Activity {
 
     private void addAddonManifest(String url) {
             if (!isSafeAddonManifestSource(url)) {
-                addonMessage = "Enter a valid HTTP(S) manifest URL without embedded credentials.";
+                addonMessage = "Choose a local JSON file or enter a valid HTTPS manifest URL without embedded credentials.";
+                render();
+                return;
+            }
+            if (isSafeHttpUrl(url) && !url.regionMatches(true, 0, "https://", 0, 8)) {
+                addonMessage = "Use HTTPS for new remote catalogs. Existing HTTP catalogs can still be refreshed.";
                 render();
                 return;
             }
@@ -299,10 +304,8 @@ public final class MainActivity extends Activity {
                     runOnUiThread(() -> {
                         if (!userInitiated && !addonRegistry.isInstalled(manifestUrl)) return;
                         if (userInitiated) {
-                            addonRegistry.install(manifestUrl);
-                            addonRegistry.setEnabled(manifestUrl, true);
-                            persistAddonManifestUrls();
-                            persistDisabledAddonManifestUrls();
+                            showAddonInstallReview(manifestUrl, parsed, titles);
+                            return;
                         }
                         addonInfo.put(manifestUrl, new AddonInfo(parsed.name, parsed.description, parsed.author,
                                 parsed.version, parsed.items.size(), parsed.id));
@@ -332,6 +335,55 @@ public final class MainActivity extends Activity {
             });
         }
 
+    private void showAddonInstallReview(String manifestUrl, AddonManifestParser.Manifest parsed,
+                                       List<Title> titles) {
+        String publisher = parsed.author.isEmpty() ? "Publisher not supplied" : "Publisher: " + parsed.author;
+        String version = parsed.version.isEmpty() ? "Version not supplied" : "Version: " + parsed.version;
+        new AlertDialog.Builder(this)
+                .setTitle("Review custom catalog")
+                .setMessage(parsed.name + "\n" + publisher + "\n" + version
+                        + "\nCatalog: " + parsed.items.size() + " item(s); direct HTTP(S) streams only."
+                        + "\n\nNOIR reads catalog data and declared media URLs. It does not run code, sign in, or scrape the publisher site. Install only sources you trust and are authorized to use.")
+                .setNegativeButton("Cancel", (dialog, which) -> {
+                    addonMessage = "Installation cancelled; the catalog was not saved.";
+                    if ("addons".equals(currentRoute)) render();
+                    if (manifestUrl.startsWith("content:")) releaseLocalManifestPermission(manifestUrl);
+                })
+                .setPositiveButton("Install catalog", (dialog, which) -> {
+                    if (!addonRegistry.install(manifestUrl)) {
+                        addonMessage = "That catalog is already installed.";
+                        render();
+                        return;
+                    }
+                    addonRegistry.setEnabled(manifestUrl, true);
+                    persistAddonManifestUrls();
+                    persistDisabledAddonManifestUrls();
+                    applyAddonManifest(manifestUrl, parsed, titles, true);
+                })
+                .setOnCancelListener(dialog -> {
+                    if (manifestUrl.startsWith("content:")) releaseLocalManifestPermission(manifestUrl);
+                })
+                .show();
+    }
+
+    private void applyAddonManifest(String manifestUrl, AddonManifestParser.Manifest parsed,
+                                    List<Title> titles, boolean newlyInstalled) {
+        addonInfo.put(manifestUrl, new AddonInfo(parsed.name, parsed.description, parsed.author,
+                parsed.version, parsed.items.size(), parsed.id));
+        for (Map.Entry<String, Title> entry : new ArrayList<>(addonTitles.entrySet())) {
+            if (manifestUrl.equals(entry.getValue().manifestUrl)) addonTitles.remove(entry.getKey());
+        }
+        if (addonRegistry.isEnabled(manifestUrl)) {
+            for (Title item : titles) {
+                knownTitles.put(item.key(), item);
+                addonTitles.put(item.key(), item);
+            }
+        }
+        addonMessage = (newlyInstalled ? "Added " : "Validated ") + parsed.name + " Â· "
+                + parsed.items.size() + " validated item(s).";
+        if ("addons".equals(currentRoute) || "home".equals(currentRoute)) render();
+    }
+
     private void setAddonEnabled(String manifestUrl, boolean enabled) {
         if (!addonRegistry.isInstalled(manifestUrl)) return;
         if (enabled) {
@@ -358,6 +410,7 @@ public final class MainActivity extends Activity {
                     stream = getContentResolver().openInputStream(Uri.parse(address));
                     if (stream == null) throw new IllegalStateException("The selected local manifest could not be opened.");
                 } else {
+                    ProviderUrlPolicy.requirePublicHttpUrl(address);
                     connection = (HttpURLConnection) new URL(address).openConnection();
                     connection.setConnectTimeout(10000);
                     connection.setReadTimeout(12000);
@@ -1155,32 +1208,38 @@ public final class MainActivity extends Activity {
 
     private void renderProviders() {
         content.setPadding(dp(64), dp(48), dp(64), dp(48));
-        content.addView(text("Watch legally", 34, TEXT, true));
-        TextView intro = text("Official free/ad-supported catalogs and the official South Park episode site. Availability and language depend on your region; opening a service leaves NOIR.", 16, MUTED, false);
+        content.addView(text("Services & sources", 34, TEXT, true));
+        TextView intro = text("These links open outside NOIR. Availability, price, login, language, and rights vary by title and region. External pages are not searchable or playable inside NOIR.", 16, MUTED, false);
         intro.setMaxWidth(dp(1000));
         LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(1020), -2);
         ip.topMargin = dp(12);
         content.addView(intro, ip);
-        TextView customSources = actionButton("Add your own movie and episode sources", true,
+        TextView customSources = actionButton("Add a custom catalog by URL", true,
                 () -> {
                     history.clear();
                     currentRoute = "addons";
                     query = "";
                     render();
                 });
-        LinearLayout.LayoutParams customSourcesParams = new LinearLayout.LayoutParams(dp(390), dp(48));
+        LinearLayout.LayoutParams customSourcesParams = new LinearLayout.LayoutParams(dp(360), dp(48));
         customSourcesParams.topMargin = dp(14);
         content.addView(customSources, customSourcesParams);
-        addOfficialService("TVP VOD", "Polish public broadcaster · free and paid titles; availability varies",
+        addOfficialService("TVP VOD", "Polish public broadcaster · selected free titles and live channels; other content may be paid",
                 "https://vod.tvp.pl/");
-        addOfficialService("Rakuten TV Free", "Ad-supported selection · supported titles vary by country",
+        addOfficialService("Rakuten TV Free", "Ad-supported selection · app/device and account requirements vary",
                 "https://www.rakuten.tv/pl/free");
-        addOfficialService("Plex", "Free ad-supported movies and series · catalog varies by region",
+        addOfficialService("Plex", "Free ad-supported catalog · free account and availability may vary",
                 "https://watch.plex.tv/");
-        addOfficialService("South Park Studios", "Official South Park episodes · English audio; episode access varies by region",
-                "https://www.southparkstudios.com/episodes");
+        addOfficialService("South Park Studios", "Official site · selected full episodes and clips; regional catalog varies; opens in browser",
+                "https://southpark.cc.com/");
         addOfficialService("JustWatch Polska", "Find where a title is legally available in Poland · discovery guide, not a player",
                 "https://www.justwatch.com/pl");
+        addOfficialService("CDA", "Official site · partner, user-uploaded, and paid Premium catalog; NOIR cannot verify individual upload rights",
+                "https://www.cda.pl/");
+        addOfficialService("Bajeczki.org", "External catalog says no fee or login; third-party video embeds and distribution permissions are not verified by NOIR",
+                "https://bajeczki.org/");
+        addOfficialService("Paramount+ · South Park", "Regional Paramount+ availability varies; not integrated in NOIR",
+                "https://www.paramountplus.com/shows/south-park/");
 
         TextView integrations = text("In-app integrations", 22, TEXT, true);
         LinearLayout.LayoutParams integrationParams = new LinearLayout.LayoutParams(-1, -2);
@@ -1265,7 +1324,7 @@ public final class MainActivity extends Activity {
     private void renderAddons() {
         content.setPadding(dp(64), dp(44), dp(64), dp(52));
         content.addView(text("Add-ons", 34, TEXT, true));
-        TextView summary = text("Add a remote or local JSON manifest for movie sources or your own series episodes and direct streams. NOIR does not execute add-on code, scrape websites, or store provider passwords.", 15, MUTED, false);
+        TextView summary = text("Add a custom catalog by entering its NOIR-compatible JSON manifest URL or choosing a local file. A website URL by itself is not a searchable provider: the manifest must list metadata and direct media URLs. NOIR does not execute add-on code, scrape websites, or handle provider sign-in.", 15, MUTED, false);
         summary.setMaxWidth(dp(900));
         LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(dp(920), -2);
         summaryParams.topMargin = dp(10);
@@ -1276,11 +1335,11 @@ public final class MainActivity extends Activity {
         content.addView(guide, guideParams);
 
         EditText manifestUrl = new EditText(this);
-        configureInput(manifestUrl, "HTTP(S) manifest URL");
+        configureInput(manifestUrl, "https://example.org/noir-catalog.json");
         LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(dp(820), dp(56));
         inputParams.topMargin = dp(14);
         content.addView(manifestUrl, inputParams);
-        TextView add = actionButton("Add and validate manifest", true,
+        TextView add = actionButton("Validate and review catalog", true,
                 () -> addAddonManifest(manifestUrl.getText().toString().trim()));
         LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(dp(280), dp(50));
         addParams.topMargin = dp(12);

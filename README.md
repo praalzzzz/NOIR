@@ -105,7 +105,9 @@ The app blocks `magnet:`/torrent URLs and rejects URL query parameters that look
 
 ## Provider status and limitations
 
-- **Official services:** The Providers tab links to TVP VOD, Rakuten TV Free, Plex, South Park Studios, and JustWatch Polska. These are external links and leave NOIR; country, catalog, language, account, and Fire TV app availability can vary. JustWatch is a discovery guide, not a video player. CDA.pl and bajeczki.org do not have an app integration here.
+See the dated [provider compatibility report](docs/provider-compatibility.md) for researched availability and tested integration status.
+
+- **External services:** The Providers tab links to TVP VOD, Rakuten TV Free, Plex, South Park Studios, JustWatch Polska, CDA, Bajeczki.org, and Paramount+. They open outside NOIR; country, catalog, price, language, and account requirements vary. JustWatch is a discovery guide, not a video player. CDA and Bajeczki.org are not integrated into NOIR, and NOIR does not verify the rights of individual user/third-party uploads.
 - **Filman:** No supported documented integration was found. NOIR does not collect Filman credentials, scrape the site, resolve its links, or bypass CAPTCHA/DRM/access controls. Filman playback is not available.
 - **Series episodes:** TMDB supplies season/episode metadata only. Add-ons can declare their own series episodes and direct stream URLs; TMDB episodes are not automatically matched to a provider's streams.
 - **Add-on format:** Add-ons are declarative catalogs, not executable provider plugins. They can supply movie streams and explicit episode streams for a series; they cannot execute provider code or scrape/resolve website links. See the [add-on developer tutorial](docs/addon-development.md) for the schema and limitations.

@@ -10,9 +10,12 @@ An add-on can supply movie sources and custom series episode sources. TMDB can s
 
 1. Create a UTF-8 JSON file.
 2. Add an `items` array with at least one movie with a direct stream, or a TV series with one or more episode stream entries.
-3. Either host the file at an HTTP(S) URL reachable from the Android TV/Fire TV device (HTTPS recommended), or copy it to storage visible to the device.
-4. In NOIR, open **Add-ons** and enter the manifest URL, or choose **Choose local JSON manifest** in the system file picker.
-5. Review the catalog item, open its title, then choose **Try stream in NOIR**. The URL validator checks structure and policy; only the actual player can test reachability, codecs, and decoder support.
+3. Either host the file at an HTTPS URL reachable from the Android TV/Fire TV device, or copy it to storage visible to the device. New remote manifests require HTTPS; previously installed HTTP manifests remain refreshable for compatibility.
+4. In NOIR, open **Add-ons** and enter the manifest URL, or choose **Choose local JSON manifest** in the system file picker. Remote URLs are fetched without following redirects, capped at 1 MB, and screened against local/private IP ranges.
+5. Review the publisher, version, catalog size, and limitations in the confirmation dialog before installing. Cancel leaves the manifest uninstalled.
+6. Open a title and choose **Try stream in NOIR**. Structural validation does not prove the URL is reachable, authorized, or decodable; only an actual playback attempt can test the source on that device.
+
+A website URL by itself is not a provider. NOIR currently supports a static declarative catalog, not arbitrary website search, scraping, OAuth, or account sessions. See the [provider compatibility report](provider-compatibility.md) for current integrations, regional research, and known limitations.
 
 The manifest is limited to 1 MB and 100 items.
 
